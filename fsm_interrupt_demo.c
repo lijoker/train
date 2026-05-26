@@ -4,6 +4,12 @@
 #include <string.h>
 #include "fsm_interrupt_demo.h"
 
+#ifdef FSM_DEMO_NO_MAIN
+#define DEMO_STATIC static __attribute__((unused))
+#else
+#define DEMO_STATIC static
+#endif
+
 typedef struct {
     bool reg_mode;
     bool hw_trigger;
@@ -33,7 +39,7 @@ typedef struct {
     const char *reason;
 } StepResult;
 
-static const char *state_name(State s) {
+DEMO_STATIC const char *state_name(State s) {
     switch (s) {
     case STATE_IDLE:
         return "IDLE";
@@ -52,13 +58,13 @@ static const char *state_name(State s) {
     }
 }
 
-static Inputs sig_default(void) {
+DEMO_STATIC Inputs sig_default(void) {
     Inputs in = {0};
     in.reg_sw_cfg_num = 1;
     return in;
 }
 
-static void fsm_init(InterruptFSM *fsm) {
+DEMO_STATIC void fsm_init(InterruptFSM *fsm) {
     fsm->state = STATE_IDLE;
     fsm->irq_level = false;
 }
@@ -67,7 +73,7 @@ static void fsm_clear_irq(InterruptFSM *fsm) {
     fsm->irq_level = false;
 }
 
-static bool fsm_raise_irq(InterruptFSM *fsm) {
+DEMO_STATIC bool fsm_raise_irq(InterruptFSM *fsm) {
     if (fsm->irq_level) {
         return false;
     }
@@ -109,12 +115,12 @@ bool simulate_interrupt_and_handle(InterruptFSM *fsm, InterruptServiceStats *sta
     return true;
 }
 
-static bool app_poll_and_service_irq(InterruptFSM *fsm, InterruptServiceStats *stats,
-                                     const char *caller_name) {
+DEMO_STATIC bool app_poll_and_service_irq(InterruptFSM *fsm, InterruptServiceStats *stats,
+                                          const char *caller_name) {
     return simulate_interrupt_and_handle(fsm, stats, caller_name, 3);
 }
 
-static StepResult fsm_step(InterruptFSM *fsm, const Inputs *sig) {
+DEMO_STATIC StepResult fsm_step(InterruptFSM *fsm, const Inputs *sig) {
     StepResult ret;
     ret.prev_state = fsm->state;
     ret.next_state = fsm->state;
@@ -201,9 +207,9 @@ static StepResult fsm_step(InterruptFSM *fsm, const Inputs *sig) {
     return ret;
 }
 
-static bool run_scenario(const char *scenario_name, const Cycle *cycles,
-                         size_t cycle_count, const int *expected_rise_cycles,
-                         size_t expected_count, unsigned int expected_irq_service_count) {
+DEMO_STATIC bool run_scenario(const char *scenario_name, const Cycle *cycles,
+                              size_t cycle_count, const int *expected_rise_cycles,
+                              size_t expected_count, unsigned int expected_irq_service_count) {
     InterruptFSM fsm;
     InterruptServiceStats irq_stats = {0};
     int actual_rise_cycles[32] = {0};
@@ -281,7 +287,7 @@ static bool run_scenario(const char *scenario_name, const Cycle *cycles,
     return true;
 }
 
-static bool scenario_hw_trigger(void) {
+DEMO_STATIC bool scenario_hw_trigger(void) {
     Inputs in0 = sig_default();
     Inputs in1 = sig_default();
     Inputs in2 = sig_default();
@@ -312,7 +318,7 @@ static bool scenario_hw_trigger(void) {
                         expected, sizeof(expected) / sizeof(expected[0]), 1U);
 }
 
-static bool scenario_sw_no_flow_control(void) {
+DEMO_STATIC bool scenario_sw_no_flow_control(void) {
     Inputs in0 = sig_default();
     Inputs in1 = sig_default();
     Inputs in2 = sig_default();
@@ -349,7 +355,7 @@ static bool scenario_sw_no_flow_control(void) {
                         sizeof(expected) / sizeof(expected[0]), 1U);
 }
 
-static bool scenario_sw_with_flow_control_multi_cfg(void) {
+DEMO_STATIC bool scenario_sw_with_flow_control_multi_cfg(void) {
     Inputs in0 = sig_default();
     Inputs in1 = sig_default();
     Inputs in2 = sig_default();
