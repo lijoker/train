@@ -46,6 +46,12 @@ typedef struct {
     bool irq_level;
 } InterruptFSM;
 
+typedef struct {
+    unsigned int enter_count;
+    unsigned int handled_steps;
+    unsigned int clear_count;
+} InterruptServiceStats;
+
 static const char *state_name(State s) {
     switch (s) {
     case STATE_IDLE:
@@ -86,6 +92,45 @@ static bool fsm_raise_irq(InterruptFSM *fsm) {
     }
     fsm->irq_level = true;
     return true;
+}
+
+/*
+ * Reusable ISR simulation API.
+ * Other functions can call this to emulate:
+ * 1) entering interrupt context
+ * 2) handling some work
+ * 3) clearing interrupt
+ */
+bool simulate_interrupt_and_handle(InterruptFSM *fsm, InterruptServiceStats *stats,
+                                   const char *caller_name, int work_steps) {
+    int i;
+
+    if (fsm == NULL || stats == NULL || caller_name == NULL) {
+        return false;
+    }
+    if (!fsm->irq_level) {
+        return false;
+    }
+
+    stats->enter_count++;
+    printf("[ISR] enter from %s, work_steps=%d\n", caller_name, work_steps);
+
+    if (work_steps <= 0) {
+        work_steps = 1;
+    }
+    for (i = 0; i < work_steps; ++i) {
+        stats->handled_steps++;
+    }
+
+    fsm_clear_irq(fsm);
+    stats->clear_count++;
+    printf("[ISR] handled and irq cleared\n");
+    return true;
+}
+
+static bool app_poll_and_service_irq(InterruptFSM *fsm, InterruptServiceStats *stats,
+                                     const char *caller_name) {
+    return simulate_interrupt_and_handle(fsm, stats, caller_name, 3);
 }
 
 static StepResult fsm_step(InterruptFSM *fsm, const Inputs *sig) {
@@ -177,8 +222,9 @@ static StepResult fsm_step(InterruptFSM *fsm, const Inputs *sig) {
 
 static bool run_scenario(const char *scenario_name, const Cycle *cycles,
                          size_t cycle_count, const int *expected_rise_cycles,
-                         size_t expected_count) {
+                         size_t expected_count, unsigned int expected_irq_service_count) {
     InterruptFSM fsm;
+    InterruptServiceStats irq_stats = {0};
     int actual_rise_cycles[32] = {0};
     size_t actual_count = 0;
     size_t i;
@@ -196,7 +242,7 @@ static bool run_scenario(const char *scenario_name, const Cycle *cycles,
         char irq_mark = '0';
 
         if (cycles[i].clear_irq_before_step) {
-            fsm_clear_irq(&fsm);
+            (void)app_poll_and_service_irq(&fsm, &irq_stats, cycles[i].name);
         }
 
         res = fsm_step(&fsm, &cycles[i].in);
@@ -242,6 +288,14 @@ static bool run_scenario(const char *scenario_name, const Cycle *cycles,
         printf("%d", actual_rise_cycles[i]);
     }
     printf("]\n");
+    if (irq_stats.enter_count != expected_irq_service_count) {
+        fprintf(stderr,
+                "[FAIL] %s: expected irq service count=%u, actual=%u\n",
+                scenario_name, expected_irq_service_count, irq_stats.enter_count);
+        return false;
+    }
+    printf("[PASS] IRQ service count = %u, handled_steps = %u\n",
+           irq_stats.enter_count, irq_stats.handled_steps);
 
     return true;
 }
@@ -274,7 +328,7 @@ static bool scenario_hw_trigger(void) {
     };
 
     return run_scenario("HW trigger flow", cycles, sizeof(cycles) / sizeof(cycles[0]),
-                        expected, sizeof(expected) / sizeof(expected[0]));
+                        expected, sizeof(expected) / sizeof(expected[0]), 1U);
 }
 
 static bool scenario_sw_no_flow_control(void) {
@@ -311,7 +365,7 @@ static bool scenario_sw_no_flow_control(void) {
 
     return run_scenario("SW flow (no flow control)", cycles,
                         sizeof(cycles) / sizeof(cycles[0]), expected,
-                        sizeof(expected) / sizeof(expected[0]));
+                        sizeof(expected) / sizeof(expected[0]), 1U);
 }
 
 static bool scenario_sw_with_flow_control_multi_cfg(void) {
@@ -383,7 +437,7 @@ static bool scenario_sw_with_flow_control_multi_cfg(void) {
 
     return run_scenario("SW flow (flow control, multi cfg)", cycles,
                         sizeof(cycles) / sizeof(cycles[0]), expected,
-                        sizeof(expected) / sizeof(expected[0]));
+                        sizeof(expected) / sizeof(expected[0]), 1U);
 }
 
 int main(void) {

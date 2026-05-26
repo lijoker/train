@@ -24,3 +24,19 @@ gcc -std=c11 -Wall -Wextra -O2 fsm_interrupt_demo.c -o fsm_interrupt_demo
 1. `HW trigger flow`：硬件触发路径，`WAIT_ACK_HW -> IDLE` 时产生中断
 2. `SW flow (no flow control)`：软件触发无流控路径，`CFG_END_SW -> IDLE` 时产生中断
 3. `SW flow (flow control, multi cfg)`：软件触发带流控多轮配置路径，仅最终完成时产生中断
+
+可复用中断模拟函数：
+
+```c
+bool simulate_interrupt_and_handle(
+    InterruptFSM *fsm,
+    InterruptServiceStats *stats,
+    const char *caller_name,
+    int work_steps
+);
+```
+
+这个函数可被其他业务函数调用，用于模拟：
+- 进入中断上下文
+- 执行一定步数的中断处理
+- 清除中断标志
