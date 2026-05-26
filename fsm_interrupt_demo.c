@@ -4,6 +4,10 @@
 #include <string.h>
 #include "fsm_interrupt_demo.h"
 
+#ifndef FSM_ISR_TRACE
+#define FSM_ISR_TRACE 0
+#endif
+
 #ifdef FSM_DEMO_NO_MAIN
 #define DEMO_STATIC static __attribute__((unused))
 #else
@@ -91,6 +95,7 @@ DEMO_STATIC bool fsm_raise_irq(InterruptFSM *fsm) {
 bool simulate_interrupt_and_handle(InterruptFSM *fsm, InterruptServiceStats *stats,
                                    const char *caller_name, int work_steps) {
     int i;
+    volatile unsigned int isr_dummy_acc = 0U;
 
     if (fsm == NULL || stats == NULL || caller_name == NULL) {
         return false;
@@ -100,18 +105,24 @@ bool simulate_interrupt_and_handle(InterruptFSM *fsm, InterruptServiceStats *sta
     }
 
     stats->enter_count++;
-    printf("[ISR] enter from %s, work_steps=%d\n", caller_name, work_steps);
+    if (FSM_ISR_TRACE) {
+        printf("[ISR] enter from %s, work_steps=%d\n", caller_name, work_steps);
+    }
 
     if (work_steps <= 0) {
         work_steps = 1;
     }
     for (i = 0; i < work_steps; ++i) {
+        isr_dummy_acc += (unsigned int)(i ^ 0x5A5A);
         stats->handled_steps++;
     }
+    (void)isr_dummy_acc;
 
     fsm_clear_irq(fsm);
     stats->clear_count++;
-    printf("[ISR] handled and irq cleared\n");
+    if (FSM_ISR_TRACE) {
+        printf("[ISR] handled and irq cleared\n");
+    }
     return true;
 }
 
