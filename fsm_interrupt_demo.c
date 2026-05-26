@@ -2,15 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-typedef enum {
-    STATE_IDLE = 0,
-    STATE_WAIT_ACK_HW,
-    STATE_WAIT_ACK_SW,
-    STATE_WAIT_PIPE_FEOF,
-    STATE_WAIT_START_ACK,
-    STATE_CFG_END_SW
-} State;
+#include "fsm_interrupt_demo.h"
 
 typedef struct {
     bool reg_mode;
@@ -40,17 +32,6 @@ typedef struct {
     bool irq_level;
     const char *reason;
 } StepResult;
-
-typedef struct {
-    State state;
-    bool irq_level;
-} InterruptFSM;
-
-typedef struct {
-    unsigned int enter_count;
-    unsigned int handled_steps;
-    unsigned int clear_count;
-} InterruptServiceStats;
 
 static const char *state_name(State s) {
     switch (s) {
@@ -440,6 +421,7 @@ static bool scenario_sw_with_flow_control_multi_cfg(void) {
                         sizeof(expected) / sizeof(expected[0]), 1U);
 }
 
+#ifndef FSM_DEMO_NO_MAIN
 int main(void) {
     bool ok = true;
 
@@ -455,3 +437,4 @@ int main(void) {
     printf("\nAll demo scenarios passed.\n");
     return EXIT_SUCCESS;
 }
+#endif

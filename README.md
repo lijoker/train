@@ -40,3 +40,12 @@ bool simulate_interrupt_and_handle(
 - 进入中断上下文
 - 执行一定步数的中断处理
 - 清除中断标志
+
+新增 C 测试代码：`fsm_interrupt_api_test.c`
+
+编译并运行测试：
+
+```bash
+gcc -std=c11 -Wall -Wextra -O2 -DFSM_DEMO_NO_MAIN fsm_interrupt_demo.c fsm_interrupt_api_test.c -o fsm_interrupt_api_test
+./fsm_interrupt_api_test
+```
