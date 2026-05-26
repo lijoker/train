@@ -7,3 +7,19 @@ self.executable_path='D:/chrom/chromedriver' 这一句中更改chromedriver的�
 更改时间
 更改班次
 运行
+
+## FSM 中断响应测试 demo
+
+新增了 `fsm_interrupt_demo.py`，用于根据状态机做中断响应验证。
+
+运行方式：
+
+```bash
+python3 fsm_interrupt_demo.py
+```
+
+脚本包含 3 个场景：
+
+1. `HW trigger flow`：硬件触发路径，`WAIT_ACK_HW -> IDLE` 时产生中断
+2. `SW flow (no flow control)`：软件触发无流控路径，`CFG_END_SW -> IDLE` 时产生中断
+3. `SW flow (flow control, multi cfg)`：软件触发带流控多轮配置路径，仅最终完成时产生中断
