@@ -8,6 +8,10 @@
 #define FSM_ISR_TRACE 0
 #endif
 
+#ifndef ISR_MEMCPY_CHUNK_BYTES
+#define ISR_MEMCPY_CHUNK_BYTES 256
+#endif
+
 #ifdef FSM_DEMO_NO_MAIN
 #define DEMO_STATIC static __attribute__((unused))
 #else
@@ -89,12 +93,14 @@ DEMO_STATIC bool fsm_raise_irq(InterruptFSM *fsm) {
  * Reusable ISR simulation API.
  * Other functions can call this to emulate:
  * 1) entering interrupt context
- * 2) handling some work
+ * 2) handling some work (including memcpy-like data movement)
  * 3) clearing interrupt
  */
 bool simulate_interrupt_and_handle(InterruptFSM *fsm, InterruptServiceStats *stats,
                                    const char *caller_name, int work_steps) {
     int i;
+    unsigned char src[ISR_MEMCPY_CHUNK_BYTES];
+    unsigned char dst[ISR_MEMCPY_CHUNK_BYTES];
     volatile unsigned int isr_dummy_acc = 0U;
 
     if (fsm == NULL || stats == NULL || caller_name == NULL) {
@@ -102,6 +108,11 @@ bool simulate_interrupt_and_handle(InterruptFSM *fsm, InterruptServiceStats *sta
     }
     if (!fsm->irq_level) {
         return false;
+    }
+
+    for (i = 0; i < ISR_MEMCPY_CHUNK_BYTES; ++i) {
+        src[i] = (unsigned char)(i ^ 0x5AU);
+        dst[i] = 0U;
     }
 
     stats->enter_count++;
@@ -113,7 +124,13 @@ bool simulate_interrupt_and_handle(InterruptFSM *fsm, InterruptServiceStats *sta
         work_steps = 1;
     }
     for (i = 0; i < work_steps; ++i) {
-        isr_dummy_acc += (unsigned int)(i ^ 0x5A5A);
+        /*
+         * Simulate memcpy workload in ISR callback:
+         * each step moves one fixed-size chunk and consumes a few bytes.
+         */
+        memcpy(dst, src, sizeof(src));
+        isr_dummy_acc += (unsigned int)dst[(unsigned int)i % sizeof(dst)];
+        src[(unsigned int)i % sizeof(src)] ^= (unsigned char)i;
         stats->handled_steps++;
     }
     (void)isr_dummy_acc;

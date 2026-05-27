@@ -38,7 +38,7 @@ bool simulate_interrupt_and_handle(
 
 这个函数可被其他业务函数调用，用于模拟：
 - 进入中断上下文
-- 执行一定步数的中断处理
+- 执行一定步数的中断处理（每步包含一次 `memcpy` 数据搬运）
 - 清除中断标志
 
 新增 C 测试代码：`fsm_interrupt_api_test.c`
