@@ -19,11 +19,24 @@ gcc -std=c11 -Wall -Wextra -O2 fsm_interrupt_demo.c -o fsm_interrupt_demo
 ./fsm_interrupt_demo
 ```
 
-程序包含 3 个场景：
+程序包含 3 个场景（按状态机描述实现）：
 
 1. `HW trigger flow`：硬件触发路径，`WAIT_ACK_HW -> IDLE` 时产生中断
 2. `SW flow (no flow control)`：软件触发无流控路径，`CFG_END_SW -> IDLE` 时产生中断
 3. `SW flow (flow control, multi cfg)`：软件触发带流控多轮配置路径，仅最终完成时产生中断
+
+状态机实现要点：
+- `IDLE(HW)`：`reg_mode && hw_trigger && cfg_done` 时，scheduler 发 `req` 给 xdma，进入 `WAIT_ACK_HW`
+- `WAIT_ACK_HW`：xdma 数据拷贝完成后给 `dma_ack`，回到 `IDLE`
+- `IDLE(SW)`：`sw_trigger` 拉高后发 `req`，进入 `WAIT_ACK_SW`（默认 LLI 已配置完成）
+- `WAIT_ACK_SW`：`dma_ack` 后，`flow_ctl_en=0 -> CFG_END_SW`，`flow_ctl_en=1 -> WAIT_PIPE_FEOF`
+- `WAIT_PIPE_FEOF`：等待 `feof` 且 `sw_flow_ctl_dly_cnt >= reg_sw_flow_ctl_dly_num`，再发 `req` 进入 `WAIT_START_ACK`
+- `WAIT_START_ACK`：等待 `dma_ack`，进入 `CFG_END_SW`
+- `CFG_END_SW`：`sw_cfg_cnt >= reg_sw_cfg_num` 则回 `IDLE`，否则 `fsync` 到来后再发 `req` 进入 `WAIT_ACK_SW`
+
+其中 xdma 搬运被模拟为 `memcpy`：
+- 每个 `req` 触发一次固定块大小拷贝
+- 拷贝完成后自动产生一次 `dma_ack`
 
 可复用中断模拟函数：
 
