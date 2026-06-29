@@ -35,7 +35,6 @@ typedef enum {
     STATE_WAIT_PIPE_FEOF,
     STATE_WAIT_START_ACK,
     STATE_CFG_END_SW,
-    STATE_DONE,
     STATE_ERROR
 } SimState;
 
@@ -76,6 +75,7 @@ typedef struct {
     int hw_delay_pending;
     int feof_seen;
     int sw_started;
+    int completed;
     char result[MAX_TEXT];
 } SimContext;
 
@@ -109,8 +109,6 @@ static const char *state_name(SimState state) {
             return "WAIT_START_ACK";
         case STATE_CFG_END_SW:
             return "CFG_END_SW";
-        case STATE_DONE:
-            return "DONE";
         case STATE_ERROR:
             return "ERROR";
         default:
@@ -126,8 +124,9 @@ static void log_cycle(SimContext *ctx, const char *message) {
     printf("[cycle %03d] %-16s %s\n", ctx->cycle, state_name(ctx->state), message);
 }
 
-static void set_done(SimContext *ctx, const char *message) {
-    ctx->state = STATE_DONE;
+static void complete_and_return_idle(SimContext *ctx, const char *message) {
+    ctx->completed = 1;
+    ctx->state = STATE_IDLE;
     snprintf(ctx->result, sizeof(ctx->result), "%s", message);
     log_cycle(ctx, message);
 }
@@ -252,7 +251,7 @@ static void try_start_hw_dma(SimContext *ctx) {
         return;
     }
 
-    set_done(ctx, "A500 path: do not wait dma_ack, return IDLE");
+    complete_and_return_idle(ctx, "A500 path complete, return IDLE");
 }
 
 static void try_start_sw_dma(SimContext *ctx, const char *why, SimState wait_state) {
@@ -392,7 +391,7 @@ static void step_state_machine(SimContext *ctx) {
 
         case STATE_WAIT_ACK_HW:
             if (ctx->cycle >= ctx->ack_cycle) {
-                set_done(ctx, "intr: dma_cfg_done");
+                complete_and_return_idle(ctx, "intr: dma_cfg_done, return IDLE");
             }
             return;
 
@@ -438,7 +437,7 @@ static void step_state_machine(SimContext *ctx) {
                 complete_sw_cfg(ctx);
             }
             if (ctx->sw_cfg_cnt >= ctx->cfg.sw_cfg_num) {
-                set_done(ctx, "intr: sw_last_done");
+                complete_and_return_idle(ctx, "intr: sw_last_done, return IDLE");
                 return;
             }
             try_restart_sw_burst(ctx);
@@ -462,21 +461,33 @@ static int run_simulation(const SimConfig *cfg) {
     init_context(&ctx, cfg);
 
     for (ctx.cycle = 0; ctx.cycle < cfg->max_cycles; ++ctx.cycle) {
-        if (ctx.state == STATE_DONE || ctx.state == STATE_ERROR) {
+        if (ctx.completed || ctx.state == STATE_ERROR) {
             break;
         }
 
         step_state_machine(&ctx);
     }
 
-    if (ctx.state != STATE_DONE && ctx.state != STATE_ERROR) {
+    if (!ctx.completed && ctx.state != STATE_ERROR) {
         snprintf(ctx.result, sizeof(ctx.result), "timeout at cycle %d", cfg->max_cycles);
         log_cycle(&ctx, ctx.result);
         return 1;
     }
 
+    if (ctx.completed && ctx.state != STATE_IDLE) {
+        snprintf(ctx.result, sizeof(ctx.result), "completed but final state is not IDLE");
+        log_cycle(&ctx, ctx.result);
+        return 1;
+    }
+
+    if (ctx.completed) {
+        char text[MAX_TEXT];
+        snprintf(text, sizeof(text), "final state check passed: %s", state_name(ctx.state));
+        log_cycle(&ctx, text);
+    }
+
     printf("result: %s\n", ctx.result);
-    return ctx.state == STATE_DONE ? 0 : 1;
+    return ctx.completed ? 0 : 1;
 }
 
 static void set_default_config(SimConfig *cfg) {
@@ -540,6 +551,7 @@ static void print_usage(const char *program) {
     printf("Usage:\n");
     printf("  %s                 Run built-in demo cases\n", program);
     printf("  %s [options]\n", program);
+    printf("  %s --self-test\n", program);
     printf("\nCommon options:\n");
     printf("  --frame-cycles N\n");
     printf("  --dma-ack-latency N\n");
@@ -674,6 +686,48 @@ static int run_demo_cases(void) {
     return rc;
 }
 
+static int run_idle_return_self_tests(void) {
+    SimConfig cfg;
+    int failures = 0;
+    int rc;
+
+    printf("\n=== Self-test: start at IDLE and return to IDLE ===\n");
+
+    set_default_config(&cfg);
+    cfg.reg_mode_hw = 1;
+    cfg.sw_trigger = 0;
+    rc = run_simulation(&cfg);
+    printf("[self-test] hw-branch: %s\n", rc == 0 ? "PASS" : "FAIL");
+    failures += (rc != 0);
+
+    set_default_config(&cfg);
+    cfg.reg_mode_hw = 0;
+    cfg.sw_trigger = 1;
+    cfg.sw_flow_ctl_en = 0;
+    cfg.sw_cfg_num = 2;
+    rc = run_simulation(&cfg);
+    printf("[self-test] sw-no-flow: %s\n", rc == 0 ? "PASS" : "FAIL");
+    failures += (rc != 0);
+
+    set_default_config(&cfg);
+    cfg.reg_mode_hw = 0;
+    cfg.sw_trigger = 1;
+    cfg.sw_flow_ctl_en = 1;
+    cfg.sw_cfg_num = 2;
+    cfg.sw_flow_ctl_dly_num = 1;
+    rc = run_simulation(&cfg);
+    printf("[self-test] sw-flow: %s\n", rc == 0 ? "PASS" : "FAIL");
+    failures += (rc != 0);
+
+    if (failures != 0) {
+        printf("[self-test] FAILED: %d case(s)\n", failures);
+        return 1;
+    }
+
+    printf("[self-test] ALL PASSED\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     SimConfig cfg;
 
@@ -686,6 +740,10 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
         print_usage(argv[0]);
         return 0;
+    }
+
+    if (strcmp(argv[1], "--self-test") == 0) {
+        return run_idle_return_self_tests();
     }
 
     if (parse_args(argc, argv, &cfg) != 0) {

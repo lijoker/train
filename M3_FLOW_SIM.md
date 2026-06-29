@@ -19,6 +19,7 @@ The current implementation is aligned to the unified state-machine diagram, with
 - `CFG_END_SW`
 
 Hardware trigger detection and `hw_dly_num` waiting are both handled inside `IDLE`, which matches the idea that the hardware branch only leaves `IDLE` after its trigger condition is satisfied.
+For completion, the simulator now requires a closed loop: it starts in `IDLE` and must return to `IDLE`.
 
 ## Build
 
@@ -32,6 +33,12 @@ If no argument is given, the program prints help and then runs three built-in br
 
 ```bash
 ./m3_flow_sim
+```
+
+Run built-in self-tests that verify "start in IDLE and end in IDLE":
+
+```bash
+./m3_flow_sim --self-test
 ```
 
 ## Custom simulation
