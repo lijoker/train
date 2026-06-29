@@ -6,6 +6,9 @@
 2. software mode with `sw_flow_ctl_en=0`
 3. software mode with `sw_flow_ctl_en=1`
 
+The command line still offers three presets (`hw`, `sw0`, `sw1`), but internally the simulator now uses **one unified state machine**.  
+The preset only changes which transitions are enabled and which parameters are meaningful.
+
 ## Build
 
 ```bash
@@ -14,7 +17,7 @@ gcc -std=c11 -Wall -Wextra -O2 m3_flow_sim.c -o m3_flow_sim
 
 ## Run demo cases
 
-If no argument is given, the program prints help and then runs three built-in demo cases:
+If no argument is given, the program prints help and then runs three built-in preset cases:
 
 ```bash
 ./m3_flow_sim

@@ -97,6 +97,18 @@ static const char *mode_name(SimMode mode) {
     }
 }
 
+static bool is_hw_mode(const SimContext *ctx) {
+    return ctx->cfg.mode == MODE_HW;
+}
+
+static bool is_sw_mode(const SimContext *ctx) {
+    return ctx->cfg.mode == MODE_SW_NO_FLOW || ctx->cfg.mode == MODE_SW_FLOW;
+}
+
+static bool sw_flow_enabled(const SimContext *ctx) {
+    return ctx->cfg.mode == MODE_SW_FLOW;
+}
+
 static const char *state_name(SimState state) {
     switch (state) {
         case STATE_IDLE:
@@ -263,20 +275,32 @@ static void try_start_hw_dma(SimContext *ctx) {
     set_done(ctx, "A500 path: do not wait dma_ack, return IDLE");
 }
 
-static void step_hw(SimContext *ctx) {
-    bool trigger_hit = false;
+static void try_start_sw_dma(SimContext *ctx, const char *why, SimState wait_state) {
+    if (dma_busy(ctx)) {
+        set_error(ctx, "return error: dma busy");
+        return;
+    }
 
-    if (!ctx->hw_armed) {
-        ctx->hw_armed = 1;
-        if (!ctx->cfg.hw_cfg_done) {
-            set_error(ctx, "intr: hw_cfg_done_error");
-            return;
-        }
-        if (ctx->cfg.hw_dly_num > ctx->cfg.frame_cycles) {
-            set_error(ctx, "intr: hw_dly_num_error");
-            return;
-        }
+    launch_dma(ctx, why);
+    ctx->state = wait_state;
+}
 
+static bool arm_hw_mode(SimContext *ctx) {
+    if (!is_hw_mode(ctx) || ctx->hw_armed) {
+        return true;
+    }
+
+    ctx->hw_armed = 1;
+    if (!ctx->cfg.hw_cfg_done) {
+        set_error(ctx, "intr: hw_cfg_done_error");
+        return false;
+    }
+    if (ctx->cfg.hw_dly_num > ctx->cfg.frame_cycles) {
+        set_error(ctx, "intr: hw_dly_num_error");
+        return false;
+    }
+
+    {
         char text[MAX_TEXT];
         snprintf(text,
                  sizeof(text),
@@ -285,8 +309,39 @@ static void step_hw(SimContext *ctx) {
         log_cycle(ctx, text);
     }
 
+    return true;
+}
+
+static void arm_next_feof_wait(SimContext *ctx) {
+    ctx->feof_seen = 0;
+    ctx->feof_cycle = -1;
+    ctx->pipe_busy_until = ctx->cycle + ctx->cfg.pipe_busy_cycles;
+    log_cycle(ctx, "enter WAIT_PRE_FEOF");
+}
+
+static void step_state_machine(SimContext *ctx) {
+    bool trigger_hit = false;
+
+    if (!arm_hw_mode(ctx)) {
+        return;
+    }
+
     switch (ctx->state) {
+        case STATE_IDLE:
+            if (!is_sw_mode(ctx)) {
+                return;
+            }
+
+            try_start_sw_dma(ctx,
+                             sw_flow_enabled(ctx) ? "sw flow first start" : "sw flow without flow-control",
+                             STATE_WAIT_ACK_SW);
+            return;
+
         case STATE_WAIT_HW_TRIGGER:
+            if (!is_hw_mode(ctx)) {
+                return;
+            }
+
             trigger_hit = (ctx->cfg.hw_trigger_source == TRIGGER_FSYNC) ? event_fsync(ctx) : event_teof(ctx);
             if (!trigger_hit) {
                 return;
@@ -324,6 +379,9 @@ static void step_hw(SimContext *ctx) {
             return;
 
         case STATE_WAIT_HW_DELAY:
+            if (!is_hw_mode(ctx)) {
+                return;
+            }
             if (ctx->cycle < ctx->due_cycle) {
                 return;
             }
@@ -331,35 +389,18 @@ static void step_hw(SimContext *ctx) {
             return;
 
         case STATE_WAIT_ACK_HW:
+            if (!is_hw_mode(ctx)) {
+                return;
+            }
             if (ctx->cycle >= ctx->ack_cycle) {
                 set_done(ctx, "intr: dma_cfg_done");
             }
             return;
 
-        default:
-            return;
-    }
-}
-
-static void try_start_sw_dma(SimContext *ctx, const char *why, SimState wait_state) {
-    if (dma_busy(ctx)) {
-        set_error(ctx, "return error: dma busy");
-        return;
-    }
-
-    launch_dma(ctx, why);
-    ctx->state = wait_state;
-}
-
-static void step_sw_no_flow(SimContext *ctx) {
-    switch (ctx->state) {
-        case STATE_IDLE:
-            try_start_sw_dma(ctx, "sw flow without flow-control", STATE_WAIT_ACK_SW);
-            return;
-
         case STATE_WAIT_ACK_SW:
             if (ctx->cycle >= ctx->ack_cycle) {
-                log_cycle(ctx, "dma_ack received");
+                log_cycle(ctx, sw_flow_enabled(ctx) ? "dma_ack received for current configuration"
+                                                    : "dma_ack received");
                 ctx->pending_cfg_complete = 1;
                 ctx->state = STATE_CFG_END_SW;
             }
@@ -371,50 +412,20 @@ static void step_sw_no_flow(SimContext *ctx) {
             }
             if (ctx->sw_cfg_cnt >= ctx->cfg.sw_cfg_num) {
                 set_done(ctx, "intr: sw_last_done");
+                return;
+            }
+            if (sw_flow_enabled(ctx)) {
+                arm_next_feof_wait(ctx);
+                ctx->state = STATE_WAIT_PRE_FEOF;
                 return;
             }
             ctx->state = STATE_IDLE;
             return;
 
-        default:
-            return;
-    }
-}
-
-static void arm_next_feof_wait(SimContext *ctx) {
-    ctx->feof_seen = 0;
-    ctx->feof_cycle = -1;
-    ctx->pipe_busy_until = ctx->cycle + ctx->cfg.pipe_busy_cycles;
-    log_cycle(ctx, "enter WAIT_PRE_FEOF");
-}
-
-static void step_sw_flow(SimContext *ctx) {
-    switch (ctx->state) {
-        case STATE_IDLE:
-            try_start_sw_dma(ctx, "sw flow first start", STATE_WAIT_ACK_SW);
-            return;
-
-        case STATE_WAIT_ACK_SW:
-            if (ctx->cycle >= ctx->ack_cycle) {
-                log_cycle(ctx, "dma_ack received for current configuration");
-                ctx->pending_cfg_complete = 1;
-                ctx->state = STATE_CFG_END_SW;
-            }
-            return;
-
-        case STATE_CFG_END_SW:
-            if (ctx->pending_cfg_complete) {
-                complete_sw_cfg(ctx);
-            }
-            if (ctx->sw_cfg_cnt >= ctx->cfg.sw_cfg_num) {
-                set_done(ctx, "intr: sw_last_done");
+        case STATE_WAIT_PRE_FEOF:
+            if (!sw_flow_enabled(ctx)) {
                 return;
             }
-            arm_next_feof_wait(ctx);
-            ctx->state = STATE_WAIT_PRE_FEOF;
-            return;
-
-        case STATE_WAIT_PRE_FEOF:
             if (ctx->cycle < ctx->pipe_busy_until) {
                 return;
             }
@@ -430,6 +441,9 @@ static void step_sw_flow(SimContext *ctx) {
             return;
 
         case STATE_WAIT_START_ACK:
+            if (!sw_flow_enabled(ctx)) {
+                return;
+            }
             if (ctx->cycle >= ctx->ack_cycle) {
                 log_cycle(ctx, "dma_ack received after flow-controlled restart");
                 ctx->pending_cfg_complete = 1;
@@ -459,20 +473,7 @@ static int run_simulation(const SimConfig *cfg) {
             break;
         }
 
-        switch (cfg->mode) {
-            case MODE_HW:
-                step_hw(&ctx);
-                break;
-            case MODE_SW_NO_FLOW:
-                step_sw_no_flow(&ctx);
-                break;
-            case MODE_SW_FLOW:
-                step_sw_flow(&ctx);
-                break;
-            default:
-                fprintf(stderr, "Unsupported mode\n");
-                return 1;
-        }
+        step_state_machine(&ctx);
     }
 
     if (ctx.state != STATE_DONE && ctx.state != STATE_ERROR) {
