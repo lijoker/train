@@ -1,13 +1,13 @@
 # M3 flow simulator
 
-`m3_flow_sim.c` is a standalone C simulator derived from the three flowcharts:
+`m3_flow_sim.c` is a standalone C simulator derived from the three flowcharts.
 
-1. hardware mode
-2. software mode with `sw_flow_ctl_en=0`
-3. software mode with `sw_flow_ctl_en=1`
+The simulator now treats hardware path, software path, and software flow-control path as **branches inside one unified state machine**, not as three separate modes.
+The key control bits are:
 
-The command line still offers three presets (`hw`, `sw0`, `sw1`), but internally the simulator now uses **one unified state machine**.  
-The preset only changes which transitions are enabled and which parameters are meaningful.
+- `reg_mode`: `hw` or `sw`
+- `sw_trigger`: software trigger enable
+- `sw_flow_ctl_en`: software flow-control branch enable
 
 The current implementation is aligned to the unified state-machine diagram, with these main states:
 
@@ -28,7 +28,7 @@ gcc -std=c11 -Wall -Wextra -O2 m3_flow_sim.c -o m3_flow_sim
 
 ## Run demo cases
 
-If no argument is given, the program prints help and then runs three built-in preset cases:
+If no argument is given, the program prints help and then runs three built-in branch examples:
 
 ```bash
 ./m3_flow_sim
@@ -36,10 +36,11 @@ If no argument is given, the program prints help and then runs three built-in pr
 
 ## Custom simulation
 
-### 1. Hardware mode
+### 1. Hardware branch
 
 ```bash
-./m3_flow_sim hw \
+./m3_flow_sim \
+  --reg-mode hw \
   --frame-cycles 16 \
   --dma-ack-latency 3 \
   --hw-cfg-done 1 \
@@ -52,21 +53,27 @@ If no argument is given, the program prints help and then runs three built-in pr
 If you want the A500-like path that does not wait for `dma_ack`:
 
 ```bash
-./m3_flow_sim hw --no-wait-ack
+./m3_flow_sim --reg-mode hw --no-wait-ack
 ```
 
-### 2. Software mode, `sw_flow_ctl_en=0`
+### 2. Software branch, `sw_flow_ctl_en=0`
 
 ```bash
-./m3_flow_sim sw0 \
+./m3_flow_sim \
+  --reg-mode sw \
+  --sw-trigger 1 \
+  --flow-ctl 0 \
   --sw-cfg-num 4 \
   --dma-ack-latency 3
 ```
 
-### 3. Software mode, `sw_flow_ctl_en=1`
+### 3. Software branch, `sw_flow_ctl_en=1`
 
 ```bash
-./m3_flow_sim sw1 \
+./m3_flow_sim \
+  --reg-mode sw \
+  --sw-trigger 1 \
+  --flow-ctl 1 \
   --sw-cfg-num 3 \
   --flow-delay 2 \
   --pipe-busy-cycles 1
@@ -77,11 +84,14 @@ If you want the A500-like path that does not wait for `dma_ack`:
 - `--frame-cycles`: number of cycles in one frame
 - `--dma-ack-latency`: how many cycles later the DMA ack arrives
 - `--initial-dma-busy-cycles`: initial busy time of DMA, used to emulate a busy error path
+- `--reg-mode hw|sw`: selects the hardware or software branch in the unified state machine
 - `--hw-cfg-done`: corresponds to `hw_cfg_done`
 - `--hw-delay`: corresponds to `hw_dly_num`
 - `--hw-cfg-done-max-idx`: corresponds to `hw_cfg_done_max_idx`
 - `--hw-skip-frame`: corresponds to `hw_skip_frame_num`
 - `--trigger fsync|teof`: hardware trigger source
+- `--sw-trigger`: corresponds to `sw_trigger`
+- `--flow-ctl`: corresponds to `sw_flow_ctl_en`
 - `--sw-cfg-num`: corresponds to `sw_cfg_num`
 - `--flow-delay`: corresponds to `sw_flow_ctl_dly_num`
 - `--pipe-busy-cycles`: how long `pipe_busy` remains asserted before the FEOF wait logic can proceed

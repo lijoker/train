@@ -6,10 +6,9 @@
 /*
  * M3 flow simulator
  *
- * This program is a software model derived from the three flowcharts:
- *   1) hardware mode
- *   2) software mode without flow control
- *   3) software mode with flow control
+ * This program is a software model derived from the three flowcharts.
+ * Hardware path, software path, and software flow-control path are treated as
+ * branches inside one unified state machine.
  *
  * Assumptions used by the simulator:
  *   - time advances in discrete cycles
@@ -23,12 +22,6 @@
  */
 
 #define MAX_TEXT 128
-
-typedef enum {
-    MODE_HW = 0,
-    MODE_SW_NO_FLOW = 1,
-    MODE_SW_FLOW = 2
-} SimMode;
 
 typedef enum {
     TRIGGER_FSYNC = 0,
@@ -47,12 +40,12 @@ typedef enum {
 } SimState;
 
 typedef struct {
-    SimMode mode;
     int frame_cycles;
     int dma_ack_latency;
     int initial_dma_busy_cycles;
     int max_cycles;
 
+    int reg_mode_hw;
     int hw_cfg_done;
     int hw_dly_num;
     int hw_cfg_done_max_idx;
@@ -60,6 +53,8 @@ typedef struct {
     TriggerSource hw_trigger_source;
     int hardware_waits_ack;
 
+    int sw_trigger;
+    int sw_flow_ctl_en;
     int sw_cfg_num;
     int sw_flow_ctl_dly_num;
     int pipe_busy_cycles;
@@ -84,29 +79,20 @@ typedef struct {
     char result[MAX_TEXT];
 } SimContext;
 
-static const char *mode_name(SimMode mode) {
-    switch (mode) {
-        case MODE_HW:
-            return "hw";
-        case MODE_SW_NO_FLOW:
-            return "sw0";
-        case MODE_SW_FLOW:
-            return "sw1";
-        default:
-            return "unknown";
-    }
+static const char *reg_mode_name(int reg_mode_hw) {
+    return reg_mode_hw ? "hw" : "sw";
 }
 
 static bool is_hw_mode(const SimContext *ctx) {
-    return ctx->cfg.mode == MODE_HW;
+    return ctx->cfg.reg_mode_hw != 0;
 }
 
 static bool is_sw_mode(const SimContext *ctx) {
-    return ctx->cfg.mode == MODE_SW_NO_FLOW || ctx->cfg.mode == MODE_SW_FLOW;
+    return ctx->cfg.reg_mode_hw == 0;
 }
 
 static bool sw_flow_enabled(const SimContext *ctx) {
-    return ctx->cfg.mode == MODE_SW_FLOW;
+    return is_sw_mode(ctx) && ctx->cfg.sw_flow_ctl_en != 0;
 }
 
 static const char *state_name(SimState state) {
@@ -201,51 +187,49 @@ static int validate_config(const SimConfig *cfg, char *error_text, size_t error_
         snprintf(error_text, error_text_size, "max_cycles must be >= 1");
         return -1;
     }
-    if (cfg->mode == MODE_HW) {
-        if (cfg->hw_dly_num < 0) {
-            snprintf(error_text, error_text_size, "hw_dly_num must be >= 0");
-            return -1;
-        }
-        if (cfg->hw_cfg_done_max_idx < 0) {
-            snprintf(error_text, error_text_size, "hw_cfg_done_max_idx must be >= 0");
-            return -1;
-        }
-    } else {
-        if (cfg->sw_cfg_num < 1) {
-            snprintf(error_text, error_text_size, "sw_cfg_num must be >= 1");
-            return -1;
-        }
-        if (cfg->sw_flow_ctl_dly_num < 0) {
-            snprintf(error_text, error_text_size, "sw_flow_ctl_dly_num must be >= 0");
-            return -1;
-        }
+    if (cfg->hw_dly_num < 0) {
+        snprintf(error_text, error_text_size, "hw_dly_num must be >= 0");
+        return -1;
+    }
+    if (cfg->hw_cfg_done_max_idx < 0) {
+        snprintf(error_text, error_text_size, "hw_cfg_done_max_idx must be >= 0");
+        return -1;
+    }
+    if (cfg->sw_cfg_num < 1) {
+        snprintf(error_text, error_text_size, "sw_cfg_num must be >= 1");
+        return -1;
+    }
+    if (cfg->sw_flow_ctl_dly_num < 0) {
+        snprintf(error_text, error_text_size, "sw_flow_ctl_dly_num must be >= 0");
+        return -1;
     }
     return 0;
 }
 
 static void print_banner(const SimConfig *cfg) {
-    printf("\n=== M3 flow simulation: mode=%s ===\n", mode_name(cfg->mode));
+    printf("\n=== M3 unified flow simulation ===\n");
     printf("frame_cycles=%d, dma_ack_latency=%d, initial_dma_busy_cycles=%d, max_cycles=%d\n",
            cfg->frame_cycles,
            cfg->dma_ack_latency,
            cfg->initial_dma_busy_cycles,
            cfg->max_cycles);
-    if (cfg->mode == MODE_HW) {
-        printf("hw_cfg_done=%d, hw_dly_num=%d, hw_cfg_done_max_idx=%d, valid_hw_cfg_bits=%d, "
-               "hw_skip_frame_num=%d, hw_trigger=%s, hardware_waits_ack=%d\n",
-               cfg->hw_cfg_done,
-               cfg->hw_dly_num,
-               cfg->hw_cfg_done_max_idx,
-               cfg->hw_cfg_done_max_idx + 1,
-               cfg->hw_skip_frame_num,
-               trigger_name(cfg->hw_trigger_source),
-               cfg->hardware_waits_ack);
-    } else {
-        printf("sw_cfg_num=%d, sw_flow_ctl_dly_num=%d, pipe_busy_cycles=%d\n",
-               cfg->sw_cfg_num,
-               cfg->sw_flow_ctl_dly_num,
-               cfg->pipe_busy_cycles);
-    }
+    printf("reg_mode=%s, sw_trigger=%d, sw_flow_ctl_en=%d\n",
+           reg_mode_name(cfg->reg_mode_hw),
+           cfg->sw_trigger,
+           cfg->sw_flow_ctl_en);
+    printf("hw_cfg_done=%d, hw_dly_num=%d, hw_cfg_done_max_idx=%d, valid_hw_cfg_bits=%d, "
+           "hw_skip_frame_num=%d, hw_trigger=%s, hardware_waits_ack=%d\n",
+           cfg->hw_cfg_done,
+           cfg->hw_dly_num,
+           cfg->hw_cfg_done_max_idx,
+           cfg->hw_cfg_done_max_idx + 1,
+           cfg->hw_skip_frame_num,
+           trigger_name(cfg->hw_trigger_source),
+           cfg->hardware_waits_ack);
+    printf("sw_cfg_num=%d, sw_flow_ctl_dly_num=%d, pipe_busy_cycles=%d\n",
+           cfg->sw_cfg_num,
+           cfg->sw_flow_ctl_dly_num,
+           cfg->pipe_busy_cycles);
 }
 
 static void init_context(SimContext *ctx, const SimConfig *cfg) {
@@ -258,7 +242,7 @@ static void init_context(SimContext *ctx, const SimConfig *cfg) {
 
 static void try_start_hw_dma(SimContext *ctx) {
     if (dma_busy(ctx)) {
-        set_error(ctx, "intr: dma_busy_error in hardware mode");
+        set_error(ctx, "intr: dma_busy_error in hardware branch");
         return;
     }
 
@@ -300,7 +284,7 @@ static bool arm_hw_mode(SimContext *ctx) {
         char text[MAX_TEXT];
         snprintf(text,
                  sizeof(text),
-                 "hardware mode armed, valid cfg_done bits = [0..%d]",
+                 "hardware branch armed, valid cfg_done bits = [0..%d]",
                  ctx->cfg.hw_cfg_done_max_idx);
         log_cycle(ctx, text);
     }
@@ -369,7 +353,7 @@ static void handle_hw_idle(SimContext *ctx) {
 }
 
 static void handle_sw_idle(SimContext *ctx) {
-    if (!is_sw_mode(ctx) || ctx->sw_started) {
+    if (!is_sw_mode(ctx) || !ctx->cfg.sw_trigger || ctx->sw_started) {
         return;
     }
 
@@ -495,14 +479,14 @@ static int run_simulation(const SimConfig *cfg) {
     return ctx.state == STATE_DONE ? 0 : 1;
 }
 
-static void set_default_config(SimConfig *cfg, SimMode mode) {
+static void set_default_config(SimConfig *cfg) {
     memset(cfg, 0, sizeof(*cfg));
-    cfg->mode = mode;
     cfg->frame_cycles = 16;
     cfg->dma_ack_latency = 3;
     cfg->initial_dma_busy_cycles = 0;
     cfg->max_cycles = 128;
 
+    cfg->reg_mode_hw = 0;
     cfg->hw_cfg_done = 1;
     cfg->hw_dly_num = 2;
     cfg->hw_cfg_done_max_idx = 2;
@@ -510,6 +494,8 @@ static void set_default_config(SimConfig *cfg, SimMode mode) {
     cfg->hw_trigger_source = TRIGGER_FSYNC;
     cfg->hardware_waits_ack = 1;
 
+    cfg->sw_trigger = 0;
+    cfg->sw_flow_ctl_en = 0;
     cfg->sw_cfg_num = 3;
     cfg->sw_flow_ctl_dly_num = 2;
     cfg->pipe_busy_cycles = 1;
@@ -526,17 +512,13 @@ static int parse_int_arg(const char *name, const char *value, int *target) {
     return 0;
 }
 
-static int parse_mode(const char *text, SimMode *mode) {
+static int parse_reg_mode(const char *text, int *reg_mode_hw) {
     if (strcmp(text, "hw") == 0) {
-        *mode = MODE_HW;
+        *reg_mode_hw = 1;
         return 0;
     }
-    if (strcmp(text, "sw0") == 0) {
-        *mode = MODE_SW_NO_FLOW;
-        return 0;
-    }
-    if (strcmp(text, "sw1") == 0) {
-        *mode = MODE_SW_FLOW;
+    if (strcmp(text, "sw") == 0) {
+        *reg_mode_hw = 0;
         return 0;
     }
     return -1;
@@ -557,16 +539,13 @@ static int parse_trigger(const char *text, TriggerSource *source) {
 static void print_usage(const char *program) {
     printf("Usage:\n");
     printf("  %s                 Run built-in demo cases\n", program);
-    printf("  %s <mode> [options]\n", program);
-    printf("\nModes:\n");
-    printf("  hw   hardware mode\n");
-    printf("  sw0  software mode, sw_flow_ctl_en=0\n");
-    printf("  sw1  software mode, sw_flow_ctl_en=1\n");
+    printf("  %s [options]\n", program);
     printf("\nCommon options:\n");
     printf("  --frame-cycles N\n");
     printf("  --dma-ack-latency N\n");
     printf("  --initial-dma-busy-cycles N\n");
     printf("  --max-cycles N\n");
+    printf("  --reg-mode hw|sw\n");
     printf("\nHardware options:\n");
     printf("  --hw-cfg-done 0|1\n");
     printf("  --hw-delay N\n");
@@ -575,22 +554,19 @@ static void print_usage(const char *program) {
     printf("  --trigger fsync|teof\n");
     printf("  --no-wait-ack      Use A500-like path\n");
     printf("\nSoftware options:\n");
+    printf("  --sw-trigger 0|1\n");
+    printf("  --flow-ctl 0|1\n");
     printf("  --sw-cfg-num N\n");
     printf("  --flow-delay N\n");
     printf("  --pipe-busy-cycles N\n");
 }
 
 static int parse_args(int argc, char **argv, SimConfig *cfg) {
-    SimMode mode;
     int i;
 
-    if (parse_mode(argv[1], &mode) != 0) {
-        fprintf(stderr, "Unknown mode: %s\n", argv[1]);
-        return -1;
-    }
-    set_default_config(cfg, mode);
+    set_default_config(cfg);
 
-    for (i = 2; i < argc; ++i) {
+    for (i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--no-wait-ack") == 0) {
             cfg->hardware_waits_ack = 0;
             continue;
@@ -601,6 +577,11 @@ static int parse_args(int argc, char **argv, SimConfig *cfg) {
         }
         if (strcmp(argv[i], "--frame-cycles") == 0) {
             if (parse_int_arg("--frame-cycles", argv[++i], &cfg->frame_cycles) != 0) {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--reg-mode") == 0) {
+            if (parse_reg_mode(argv[++i], &cfg->reg_mode_hw) != 0) {
+                fprintf(stderr, "Unknown reg-mode: %s\n", argv[i]);
                 return -1;
             }
         } else if (strcmp(argv[i], "--dma-ack-latency") == 0) {
@@ -640,6 +621,14 @@ static int parse_args(int argc, char **argv, SimConfig *cfg) {
             if (parse_int_arg("--sw-cfg-num", argv[++i], &cfg->sw_cfg_num) != 0) {
                 return -1;
             }
+        } else if (strcmp(argv[i], "--sw-trigger") == 0) {
+            if (parse_int_arg("--sw-trigger", argv[++i], &cfg->sw_trigger) != 0) {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--flow-ctl") == 0) {
+            if (parse_int_arg("--flow-ctl", argv[++i], &cfg->sw_flow_ctl_en) != 0) {
+                return -1;
+            }
         } else if (strcmp(argv[i], "--flow-delay") == 0) {
             if (parse_int_arg("--flow-delay", argv[++i], &cfg->sw_flow_ctl_dly_num) != 0) {
                 return -1;
@@ -661,14 +650,22 @@ static int run_demo_cases(void) {
     SimConfig cfg;
     int rc = 0;
 
-    set_default_config(&cfg, MODE_HW);
+    set_default_config(&cfg);
+    cfg.reg_mode_hw = 1;
+    cfg.sw_trigger = 0;
     rc |= run_simulation(&cfg);
 
-    set_default_config(&cfg, MODE_SW_NO_FLOW);
+    set_default_config(&cfg);
+    cfg.reg_mode_hw = 0;
+    cfg.sw_trigger = 1;
+    cfg.sw_flow_ctl_en = 0;
     cfg.sw_cfg_num = 4;
     rc |= run_simulation(&cfg);
 
-    set_default_config(&cfg, MODE_SW_FLOW);
+    set_default_config(&cfg);
+    cfg.reg_mode_hw = 0;
+    cfg.sw_trigger = 1;
+    cfg.sw_flow_ctl_en = 1;
     cfg.sw_cfg_num = 3;
     cfg.sw_flow_ctl_dly_num = 2;
     cfg.pipe_busy_cycles = 1;
