@@ -9,6 +9,17 @@
 The command line still offers three presets (`hw`, `sw0`, `sw1`), but internally the simulator now uses **one unified state machine**.  
 The preset only changes which transitions are enabled and which parameters are meaningful.
 
+The current implementation is aligned to the unified state-machine diagram, with these main states:
+
+- `IDLE`
+- `WAIT_ACK_HW`
+- `WAIT_ACK_SW`
+- `WAIT_PIPE_FEOF`
+- `WAIT_START_ACK`
+- `CFG_END_SW`
+
+Hardware trigger detection and `hw_dly_num` waiting are both handled inside `IDLE`, which matches the idea that the hardware branch only leaves `IDLE` after its trigger condition is satisfied.
+
 ## Build
 
 ```bash
