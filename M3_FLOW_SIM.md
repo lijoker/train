@@ -48,6 +48,12 @@ Run built-in self-tests that verify "start in IDLE and end in IDLE":
 ./m3_flow_sim --self-test
 ```
 
+Verify one-to-one mapping of scheduler channels to DMA channels (default 32/32):
+
+```bash
+./m3_flow_sim --verify-channel-map
+```
+
 ## Custom simulation
 
 ### 1. Hardware branch
@@ -100,6 +106,8 @@ If you want the A500-like path that does not wait for `dma_ack`:
 - `--initial-dma-busy-cycles`: initial busy time of DMA, used to emulate a busy error path
 - `--watchdog-cycles`: no-progress watchdog threshold (`0` means auto-derived from scenario timing)
 - `--reg-mode hw|sw`: selects the hardware or software branch in the unified state machine
+- `--scheduler-channels`: scheduler channel count for mapping verification (default `32`)
+- `--dma-channels`: DMA channel count for mapping verification (default `32`)
 - `--hw-cfg-done`: corresponds to `hw_cfg_done`
 - `--hw-delay`: corresponds to `hw_dly_num`
 - `--hw-cfg-done-max-idx`: corresponds to `hw_cfg_done_max_idx`

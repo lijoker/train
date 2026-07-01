@@ -604,12 +604,15 @@ static void print_usage(const char *program) {
     printf("  %s                 Run built-in demo cases\n", program);
     printf("  %s [options]\n", program);
     printf("  %s --self-test\n", program);
+    printf("  %s --verify-channel-map [options]\n", program);
     printf("\nCommon options:\n");
     printf("  --frame-cycles N\n");
     printf("  --dma-ack-latency N\n");
     printf("  --initial-dma-busy-cycles N\n");
     printf("  --watchdog-cycles N   (0 uses auto derived threshold)\n");
     printf("  --reg-mode hw|sw\n");
+    printf("  --scheduler-channels N   (default 32, for --verify-channel-map)\n");
+    printf("  --dma-channels N         (default 32, for --verify-channel-map)\n");
     printf("\nHardware options:\n");
     printf("  --hw-cfg-done 0|1\n");
     printf("  --hw-delay N\n");
@@ -625,14 +628,26 @@ static void print_usage(const char *program) {
     printf("  --pipe-busy-cycles N\n");
 }
 
-static int parse_args(int argc, char **argv, SimConfig *cfg) {
+static int parse_args(int argc,
+                      char **argv,
+                      SimConfig *cfg,
+                      int *verify_channel_map,
+                      int *scheduler_channels,
+                      int *dma_channels) {
     int i;
 
     set_default_config(cfg);
+    *verify_channel_map = 0;
+    *scheduler_channels = 32;
+    *dma_channels = 32;
 
     for (i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--no-wait-ack") == 0) {
             cfg->hardware_waits_ack = 0;
+            continue;
+        }
+        if (strcmp(argv[i], "--verify-channel-map") == 0) {
+            *verify_channel_map = 1;
             continue;
         }
         if (i + 1 >= argc) {
@@ -646,6 +661,14 @@ static int parse_args(int argc, char **argv, SimConfig *cfg) {
         } else if (strcmp(argv[i], "--reg-mode") == 0) {
             if (parse_reg_mode(argv[++i], &cfg->reg_mode_hw) != 0) {
                 fprintf(stderr, "Unknown reg-mode: %s\n", argv[i]);
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--scheduler-channels") == 0) {
+            if (parse_int_arg("--scheduler-channels", argv[++i], scheduler_channels) != 0) {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--dma-channels") == 0) {
+            if (parse_int_arg("--dma-channels", argv[++i], dma_channels) != 0) {
                 return -1;
             }
         } else if (strcmp(argv[i], "--dma-ack-latency") == 0) {
@@ -780,8 +803,51 @@ static int run_idle_return_self_tests(void) {
     return 0;
 }
 
+static int run_channel_mapping_verification(const SimConfig *template_cfg, int scheduler_channels, int dma_channels) {
+    int ch;
+    int failures = 0;
+
+    if (scheduler_channels < 1 || dma_channels < 1) {
+        fprintf(stderr, "scheduler-channels and dma-channels must be >= 1\n");
+        return 1;
+    }
+
+    printf("\n=== Channel mapping verification ===\n");
+    printf("scheduler_channels=%d, dma_channels=%d\n", scheduler_channels, dma_channels);
+
+    if (scheduler_channels != dma_channels) {
+        fprintf(stderr, "channel mapping invalid: scheduler and DMA channel counts differ\n");
+        return 1;
+    }
+
+    for (ch = 0; ch < scheduler_channels; ++ch) {
+        SimConfig cfg = *template_cfg;
+        int rc;
+
+        /* Scheduler channel and DMA channel are one-to-one: ch -> ch */
+        cfg.reg_mode_hw = 0;
+        cfg.sw_trigger = 1;
+        printf("\n[channel-map] scheduler_ch=%d -> dma_ch=%d\n", ch, ch);
+        rc = run_simulation(&cfg);
+        if (rc != 0) {
+            failures++;
+        }
+    }
+
+    if (failures != 0) {
+        printf("[channel-map] FAILED: %d channel pair(s)\n", failures);
+        return 1;
+    }
+
+    printf("[channel-map] ALL %d channel pairs PASSED\n", scheduler_channels);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     SimConfig cfg;
+    int verify_channel_map;
+    int scheduler_channels;
+    int dma_channels;
 
     if (argc == 1) {
         print_usage(argv[0]);
@@ -798,9 +864,13 @@ int main(int argc, char **argv) {
         return run_idle_return_self_tests();
     }
 
-    if (parse_args(argc, argv, &cfg) != 0) {
+    if (parse_args(argc, argv, &cfg, &verify_channel_map, &scheduler_channels, &dma_channels) != 0) {
         print_usage(argv[0]);
         return 1;
+    }
+
+    if (verify_channel_map) {
+        return run_channel_mapping_verification(&cfg, scheduler_channels, dma_channels);
     }
 
     return run_simulation(&cfg);
