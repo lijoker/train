@@ -16,9 +16,7 @@
  *   - teof happens in the middle of each frame
  *   - feof happens at the last cycle of each frame
  *   - one DMA request completes after dma_ack_latency cycles
- *   - one simulation run models one channel transaction
- *   - sw_cfg_num is treated as the total configured channels
- *   - channel_index selects which channel this run simulates
+ *   - one sw_trigger configures sw_cfg_num frames
  *   - hw_skip_frame_num skips the first N trigger opportunities
  *   - hw_cfg_done_max_idx is reported as metadata, matching the diagram note
  */
@@ -57,7 +55,6 @@ typedef struct {
     int sw_trigger;
     int sw_flow_ctl_en;
     int sw_cfg_num;
-    int channel_index;
     int sw_flow_ctl_dly_num;
     int pipe_busy_cycles;
 } SimConfig;
@@ -170,7 +167,7 @@ static void launch_dma(SimContext *ctx, const char *why) {
 
 static void complete_sw_cfg(SimContext *ctx) {
     ctx->pending_cfg_complete = 0;
-    ctx->sw_cfg_cnt = ctx->cfg.channel_index + 1;
+    ctx->sw_cfg_cnt++;
     char text[MAX_TEXT];
     snprintf(text, sizeof(text), "CFG_END_SW, sw_cfg_cnt=%d/%d", ctx->sw_cfg_cnt, ctx->cfg.sw_cfg_num);
     log_cycle(ctx, text);
@@ -201,12 +198,6 @@ static int validate_config(const SimConfig *cfg, char *error_text, size_t error_
         snprintf(error_text, error_text_size, "sw_cfg_num must be >= 1");
         return -1;
     }
-    if (cfg->channel_index < 0 || cfg->channel_index >= cfg->sw_cfg_num) {
-        snprintf(error_text,
-                 error_text_size,
-                 "channel_index must satisfy 0 <= channel_index < sw_cfg_num");
-        return -1;
-    }
     if (cfg->sw_flow_ctl_dly_num < 0) {
         snprintf(error_text, error_text_size, "sw_flow_ctl_dly_num must be >= 0");
         return -1;
@@ -234,9 +225,8 @@ static void print_banner(const SimConfig *cfg) {
            cfg->hw_skip_frame_num,
            trigger_name(cfg->hw_trigger_source),
            cfg->hardware_waits_ack);
-    printf("sw_cfg_num=%d, channel_index=%d, sw_flow_ctl_dly_num=%d, pipe_busy_cycles=%d\n",
+    printf("sw_cfg_num=%d, sw_flow_ctl_dly_num=%d, pipe_busy_cycles=%d\n",
            cfg->sw_cfg_num,
-           cfg->channel_index,
            cfg->sw_flow_ctl_dly_num,
            cfg->pipe_busy_cycles);
 }
@@ -373,6 +363,18 @@ static void handle_sw_idle(SimContext *ctx) {
                      STATE_WAIT_ACK_SW);
 }
 
+static void try_restart_sw_burst(SimContext *ctx) {
+    if (sw_flow_enabled(ctx)) {
+        if (!event_fsync(ctx)) {
+            return;
+        }
+        try_start_sw_dma(ctx, "fsync restart after CFG_END_SW", STATE_WAIT_ACK_SW);
+        return;
+    }
+
+    try_start_sw_dma(ctx, "next software configuration", STATE_WAIT_ACK_SW);
+}
+
 static void step_state_machine(SimContext *ctx) {
     if (!arm_hw_mode(ctx)) {
         return;
@@ -434,7 +436,11 @@ static void step_state_machine(SimContext *ctx) {
             if (ctx->pending_cfg_complete) {
                 complete_sw_cfg(ctx);
             }
-            complete_and_return_idle(ctx, "intr: sw_last_done, return IDLE");
+            if (ctx->sw_cfg_cnt >= ctx->cfg.sw_cfg_num) {
+                complete_and_return_idle(ctx, "intr: sw_last_done, return IDLE");
+                return;
+            }
+            try_restart_sw_burst(ctx);
             return;
 
         default:
@@ -449,7 +455,7 @@ static int compute_wait_watchdog_cycles(const SimConfig *cfg) {
 }
 
 static int compute_completion_budget_cycles(const SimConfig *cfg) {
-    int sw_burst_factor = 1;
+    int sw_burst_factor = cfg->sw_cfg_num < 1 ? 1 : cfg->sw_cfg_num;
     int hw_factor = cfg->hw_skip_frame_num + 2;
     int sw_factor = (cfg->sw_flow_ctl_en ? (cfg->frame_cycles * 2) : (cfg->dma_ack_latency + 4)) * sw_burst_factor;
     int budget = cfg->initial_dma_busy_cycles + (cfg->frame_cycles * hw_factor) + sw_factor +
@@ -554,7 +560,6 @@ static void set_default_config(SimConfig *cfg) {
     cfg->sw_trigger = 0;
     cfg->sw_flow_ctl_en = 0;
     cfg->sw_cfg_num = 3;
-    cfg->channel_index = 0;
     cfg->sw_flow_ctl_dly_num = 2;
     cfg->pipe_busy_cycles = 1;
 }
@@ -616,7 +621,6 @@ static void print_usage(const char *program) {
     printf("  --sw-trigger 0|1\n");
     printf("  --flow-ctl 0|1\n");
     printf("  --sw-cfg-num N\n");
-    printf("  --channel-index N\n");
     printf("  --flow-delay N\n");
     printf("  --pipe-busy-cycles N\n");
 }
@@ -679,10 +683,6 @@ static int parse_args(int argc, char **argv, SimConfig *cfg) {
             }
         } else if (strcmp(argv[i], "--sw-cfg-num") == 0) {
             if (parse_int_arg("--sw-cfg-num", argv[++i], &cfg->sw_cfg_num) != 0) {
-                return -1;
-            }
-        } else if (strcmp(argv[i], "--channel-index") == 0) {
-            if (parse_int_arg("--channel-index", argv[++i], &cfg->channel_index) != 0) {
                 return -1;
             }
         } else if (strcmp(argv[i], "--sw-trigger") == 0) {
