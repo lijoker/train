@@ -54,6 +54,15 @@ Verify one-to-one mapping of scheduler channels to DMA channels (default 32/32):
 ./m3_flow_sim --verify-channel-map
 ```
 
+Run the same mapping verification in parallel channel progression mode:
+
+```bash
+./m3_flow_sim --verify-channel-map-parallel
+```
+
+This mode advances all scheduler/DMA channel pairs under the same global cycle, which better matches
+bare-metal usage where channels are started together and converge through interrupt-driven completion.
+
 ## Norm interrupt simulation
 
 The simulator models 4 norm interrupt types per channel (conceptually 64-bit vector for 16 channels):

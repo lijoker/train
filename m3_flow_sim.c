@@ -25,6 +25,7 @@
 #define MAX_TEXT 128
 #define NORM_IRQ_BITS 64
 #define NORM_IRQ_CHANNELS (NORM_IRQ_BITS / 4)
+#define MAX_SIM_CHANNELS 64
 
 typedef enum {
     TRIGGER_FSYNC = 0,
@@ -711,6 +712,7 @@ static void print_usage(const char *program) {
     printf("  %s [options]\n", program);
     printf("  %s --self-test\n", program);
     printf("  %s --verify-channel-map [options]\n", program);
+    printf("  %s --verify-channel-map-parallel [options]\n", program);
     printf("\nCommon options:\n");
     printf("  --frame-cycles N\n");
     printf("  --dma-ack-latency N\n");
@@ -739,12 +741,14 @@ static int parse_args(int argc,
                       char **argv,
                       SimConfig *cfg,
                       int *verify_channel_map,
+                      int *verify_channel_map_parallel,
                       int *scheduler_channels,
                       int *dma_channels) {
     int i;
 
     set_default_config(cfg);
     *verify_channel_map = 0;
+    *verify_channel_map_parallel = 0;
     *scheduler_channels = 32;
     *dma_channels = 32;
 
@@ -755,6 +759,10 @@ static int parse_args(int argc,
         }
         if (strcmp(argv[i], "--verify-channel-map") == 0) {
             *verify_channel_map = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--verify-channel-map-parallel") == 0) {
+            *verify_channel_map_parallel = 1;
             continue;
         }
         if (i + 1 >= argc) {
@@ -955,9 +963,133 @@ static int run_channel_mapping_verification(const SimConfig *template_cfg, int s
     return 0;
 }
 
+static int run_channel_mapping_parallel_verification(const SimConfig *template_cfg,
+                                                     int scheduler_channels,
+                                                     int dma_channels) {
+    SimContext ctxs[MAX_SIM_CHANNELS];
+    SimConfig cfgs[MAX_SIM_CHANNELS];
+    int ch;
+    int completed = 0;
+    int failures = 0;
+    int global_cycle;
+    int watchdog_limit;
+    int completion_budget;
+    int stall_cycles = 0;
+
+    if (scheduler_channels < 1 || dma_channels < 1) {
+        fprintf(stderr, "scheduler-channels and dma-channels must be >= 1\n");
+        return 1;
+    }
+    if (scheduler_channels != dma_channels) {
+        fprintf(stderr, "channel mapping invalid: scheduler and DMA channel counts differ\n");
+        return 1;
+    }
+    if (scheduler_channels > MAX_SIM_CHANNELS) {
+        fprintf(stderr, "scheduler-channels exceeds MAX_SIM_CHANNELS=%d\n", MAX_SIM_CHANNELS);
+        return 1;
+    }
+
+    printf("\n=== Channel mapping verification (parallel) ===\n");
+    printf("scheduler_channels=%d, dma_channels=%d\n", scheduler_channels, dma_channels);
+
+    watchdog_limit = template_cfg->watchdog_cycles == 0 ? compute_wait_watchdog_cycles(template_cfg)
+                                                         : template_cfg->watchdog_cycles;
+    completion_budget = compute_completion_budget_cycles(template_cfg) + template_cfg->frame_cycles;
+
+    for (ch = 0; ch < scheduler_channels; ++ch) {
+        char error_text[MAX_TEXT];
+        cfgs[ch] = *template_cfg;
+        cfgs[ch].reg_mode_hw = 0;
+        cfgs[ch].sw_trigger = 1;
+        cfgs[ch].channel_id = ch;
+        if (validate_config(&cfgs[ch], error_text, sizeof(error_text)) != 0) {
+            fprintf(stderr, "Invalid config for channel %d: %s\n", ch, error_text);
+            return 1;
+        }
+        init_context(&ctxs[ch], &cfgs[ch]);
+    }
+
+    for (global_cycle = 0; global_cycle <= completion_budget && completed < scheduler_channels; ++global_cycle) {
+        int progressed_any = 0;
+        for (ch = 0; ch < scheduler_channels; ++ch) {
+            SimContext *ctx = &ctxs[ch];
+            SimState prev_state;
+            int prev_sw_cfg_cnt;
+            int prev_pending_cfg;
+            int prev_skipped_triggers;
+            int prev_hw_delay_pending;
+            int prev_feof_seen;
+            int prev_ack_cycle;
+            int prev_due_cycle;
+
+            if (ctx->completed || ctx->state == STATE_ERROR) {
+                continue;
+            }
+
+            ctx->cycle = global_cycle;
+            prev_state = ctx->state;
+            prev_sw_cfg_cnt = ctx->sw_cfg_cnt;
+            prev_pending_cfg = ctx->pending_cfg_complete;
+            prev_skipped_triggers = ctx->skipped_triggers;
+            prev_hw_delay_pending = ctx->hw_delay_pending;
+            prev_feof_seen = ctx->feof_seen;
+            prev_ack_cycle = ctx->ack_cycle;
+            prev_due_cycle = ctx->due_cycle;
+
+            step_state_machine(ctx);
+
+            if (ctx->completed || ctx->state == STATE_ERROR || ctx->state != prev_state ||
+                ctx->sw_cfg_cnt != prev_sw_cfg_cnt || ctx->pending_cfg_complete != prev_pending_cfg ||
+                ctx->skipped_triggers != prev_skipped_triggers || ctx->hw_delay_pending != prev_hw_delay_pending ||
+                ctx->feof_seen != prev_feof_seen || ctx->ack_cycle != prev_ack_cycle ||
+                ctx->due_cycle != prev_due_cycle) {
+                progressed_any = 1;
+            }
+
+            if (ctx->state == STATE_ERROR) {
+                failures++;
+                completed++;
+                printf("[channel-map-parallel] ch=%d FAILED: %s\n", ch, ctx->result);
+            } else if (ctx->completed) {
+                if (ctx->state != STATE_IDLE) {
+                    failures++;
+                    printf("[channel-map-parallel] ch=%d FAILED: completed but not IDLE\n", ch);
+                } else {
+                    printf("[channel-map-parallel] ch=%d PASSED\n", ch);
+                }
+                print_irq_summary(ctx);
+                completed++;
+            }
+        }
+
+        if (!progressed_any) {
+            stall_cycles++;
+            if (stall_cycles > watchdog_limit) {
+                fprintf(stderr, "[channel-map-parallel] watchdog timeout: no progress\n");
+                return 1;
+            }
+        } else {
+            stall_cycles = 0;
+        }
+    }
+
+    if (completed < scheduler_channels) {
+        fprintf(stderr, "[channel-map-parallel] completion budget exceeded before all channels finished\n");
+        return 1;
+    }
+    if (failures != 0) {
+        printf("[channel-map-parallel] FAILED: %d channel pair(s)\n", failures);
+        return 1;
+    }
+
+    printf("[channel-map-parallel] ALL %d channel pairs PASSED\n", scheduler_channels);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     SimConfig cfg;
     int verify_channel_map;
+    int verify_channel_map_parallel;
     int scheduler_channels;
     int dma_channels;
 
@@ -976,9 +1108,19 @@ int main(int argc, char **argv) {
         return run_idle_return_self_tests();
     }
 
-    if (parse_args(argc, argv, &cfg, &verify_channel_map, &scheduler_channels, &dma_channels) != 0) {
+    if (parse_args(argc,
+                   argv,
+                   &cfg,
+                   &verify_channel_map,
+                   &verify_channel_map_parallel,
+                   &scheduler_channels,
+                   &dma_channels) != 0) {
         print_usage(argv[0]);
         return 1;
+    }
+
+    if (verify_channel_map_parallel) {
+        return run_channel_mapping_parallel_verification(&cfg, scheduler_channels, dma_channels);
     }
 
     if (verify_channel_map) {
