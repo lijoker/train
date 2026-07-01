@@ -54,6 +54,33 @@ Verify one-to-one mapping of scheduler channels to DMA channels (default 32/32):
 ./m3_flow_sim --verify-channel-map
 ```
 
+## Norm interrupt simulation
+
+The simulator models 4 norm interrupt types per channel (conceptually 64-bit vector for 16 channels):
+
+1. `dma_cfg_complete`
+   - Hardware branch: each `dma_ack` reports this interrupt
+   - Software branch: only `fsync_trigger` `dma_ack` reports this interrupt
+   - `feof_trigger` `dma_ack` does not report `dma_cfg_complete`
+2. `flow_ctrl_done`
+   - Software branch: `feof_trigger` `dma_ack` reports this interrupt
+3. `sw_last_done`
+   - Software branch: when the last configuration transfer of current `sw_trigger` burst finishes
+4. `dma_hd_wait_norm`
+   - DMA transfer finished and returned to wait-handshake state
+
+The following firmware actions are logged in the simulation:
+
+- `writel(0x1, 0x42120120);` trigger interrupt
+- `fwk_interrupt_set_isr(77, &sw_int_isr);` ISR mount
+- `setbits_32(0x42120180, BIT(2));` interrupt clear
+
+You can choose a channel id for interrupt attribution:
+
+```bash
+./m3_flow_sim --reg-mode sw --sw-trigger 1 --flow-ctl 1 --sw-cfg-num 3 --channel-id 7
+```
+
 ## Custom simulation
 
 ### 1. Hardware branch
@@ -116,6 +143,7 @@ If you want the A500-like path that does not wait for `dma_ack`:
 - `--sw-trigger`: corresponds to `sw_trigger`
 - `--flow-ctl`: corresponds to `sw_flow_ctl_en`
 - `--sw-cfg-num`: number of frames configured by one `sw_trigger`
+- `--channel-id`: channel id for interrupt accounting and reporting
 - `--flow-delay`: corresponds to `sw_flow_ctl_dly_num`
 - `--pipe-busy-cycles`: how long `pipe_busy` remains asserted before the FEOF wait logic can proceed
 

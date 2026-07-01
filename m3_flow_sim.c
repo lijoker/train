@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 /*
  * M3 flow simulator
@@ -22,11 +23,20 @@
  */
 
 #define MAX_TEXT 128
+#define NORM_IRQ_BITS 64
+#define NORM_IRQ_CHANNELS (NORM_IRQ_BITS / 4)
 
 typedef enum {
     TRIGGER_FSYNC = 0,
     TRIGGER_TEOF = 1
 } TriggerSource;
+
+typedef enum {
+    IRQ_DMA_CFG_COMPLETE = 0,
+    IRQ_FLOW_CTRL_DONE = 1,
+    IRQ_SW_LAST_DONE = 2,
+    IRQ_DMA_HD_WAIT_NORM = 3
+} NormIrqType;
 
 typedef enum {
     STATE_IDLE = 0,
@@ -55,6 +65,7 @@ typedef struct {
     int sw_trigger;
     int sw_flow_ctl_en;
     int sw_cfg_num;
+    int channel_id;
     int sw_flow_ctl_dly_num;
     int pipe_busy_cycles;
 } SimConfig;
@@ -76,6 +87,9 @@ typedef struct {
     int feof_seen;
     int sw_started;
     int completed;
+    int isr_registered;
+    uint64_t norm_irq_bitmap;
+    int norm_irq_count[4];
     char result[MAX_TEXT];
 } SimContext;
 
@@ -120,8 +134,61 @@ static const char *trigger_name(TriggerSource source) {
     return source == TRIGGER_FSYNC ? "fsync" : "teof";
 }
 
+static const char *irq_name(NormIrqType type) {
+    switch (type) {
+        case IRQ_DMA_CFG_COMPLETE:
+            return "dma_cfg_complete";
+        case IRQ_FLOW_CTRL_DONE:
+            return "flow_ctrl_done";
+        case IRQ_SW_LAST_DONE:
+            return "sw_last_done";
+        case IRQ_DMA_HD_WAIT_NORM:
+            return "dma_hd_wait_norm";
+        default:
+            return "unknown_irq";
+    }
+}
+
 static void log_cycle(SimContext *ctx, const char *message) {
     printf("[cycle %03d] %-16s %s\n", ctx->cycle, state_name(ctx->state), message);
+}
+
+static void register_sw_isr(SimContext *ctx) {
+    if (ctx->isr_registered) {
+        return;
+    }
+    ctx->isr_registered = 1;
+    log_cycle(ctx, "fwk_interrupt_set_isr(77, &sw_int_isr);");
+}
+
+static void trigger_norm_irq(SimContext *ctx, NormIrqType type, const char *reason) {
+    char text[MAX_TEXT];
+    int bit_index = (ctx->cfg.channel_id * 4) + (int)type;
+
+    register_sw_isr(ctx);
+    ctx->norm_irq_count[(int)type]++;
+    if (bit_index >= 0 && bit_index < NORM_IRQ_BITS) {
+        ctx->norm_irq_bitmap |= ((uint64_t)1 << bit_index);
+    }
+
+    snprintf(text,
+             sizeof(text),
+             "writel(0x1, 0x42120120); irq=%s ch=%d reason=%s",
+             irq_name(type),
+             ctx->cfg.channel_id,
+             reason);
+    log_cycle(ctx, text);
+    log_cycle(ctx, "setbits_32(0x42120180, BIT(2));");
+}
+
+static void print_irq_summary(const SimContext *ctx) {
+    printf("irq_summary(ch=%d): dma_cfg_complete=%d flow_ctrl_done=%d sw_last_done=%d dma_hd_wait_norm=%d bitmap=0x%016llx\n",
+           ctx->cfg.channel_id,
+           ctx->norm_irq_count[IRQ_DMA_CFG_COMPLETE],
+           ctx->norm_irq_count[IRQ_FLOW_CTRL_DONE],
+           ctx->norm_irq_count[IRQ_SW_LAST_DONE],
+           ctx->norm_irq_count[IRQ_DMA_HD_WAIT_NORM],
+           (unsigned long long)ctx->norm_irq_bitmap);
 }
 
 static void complete_and_return_idle(SimContext *ctx, const char *message) {
@@ -198,6 +265,10 @@ static int validate_config(const SimConfig *cfg, char *error_text, size_t error_
         snprintf(error_text, error_text_size, "sw_cfg_num must be >= 1");
         return -1;
     }
+    if (cfg->channel_id < 0) {
+        snprintf(error_text, error_text_size, "channel_id must be >= 0");
+        return -1;
+    }
     if (cfg->sw_flow_ctl_dly_num < 0) {
         snprintf(error_text, error_text_size, "sw_flow_ctl_dly_num must be >= 0");
         return -1;
@@ -225,8 +296,9 @@ static void print_banner(const SimConfig *cfg) {
            cfg->hw_skip_frame_num,
            trigger_name(cfg->hw_trigger_source),
            cfg->hardware_waits_ack);
-    printf("sw_cfg_num=%d, sw_flow_ctl_dly_num=%d, pipe_busy_cycles=%d\n",
+    printf("sw_cfg_num=%d, channel_id=%d, sw_flow_ctl_dly_num=%d, pipe_busy_cycles=%d\n",
            cfg->sw_cfg_num,
+           cfg->channel_id,
            cfg->sw_flow_ctl_dly_num,
            cfg->pipe_busy_cycles);
 }
@@ -391,6 +463,8 @@ static void step_state_machine(SimContext *ctx) {
 
         case STATE_WAIT_ACK_HW:
             if (ctx->cycle >= ctx->ack_cycle) {
+                trigger_norm_irq(ctx, IRQ_DMA_CFG_COMPLETE, "hardware dma_ack");
+                trigger_norm_irq(ctx, IRQ_DMA_HD_WAIT_NORM, "hardware transfer done");
                 complete_and_return_idle(ctx, "intr: dma_cfg_done, return IDLE");
             }
             return;
@@ -398,10 +472,14 @@ static void step_state_machine(SimContext *ctx) {
         case STATE_WAIT_ACK_SW:
             if (ctx->cycle >= ctx->ack_cycle) {
                 if (sw_flow_enabled(ctx)) {
+                    trigger_norm_irq(ctx, IRQ_DMA_CFG_COMPLETE, "software fsync_trigger dma_ack");
+                    trigger_norm_irq(ctx, IRQ_DMA_HD_WAIT_NORM, "software fsync transfer done");
                     log_cycle(ctx, "dma_ack received, flow_ctl_en=1, go WAIT_PIPE_FEOF");
                     arm_next_feof_wait(ctx);
                     ctx->state = STATE_WAIT_PIPE_FEOF;
                 } else {
+                    trigger_norm_irq(ctx, IRQ_DMA_CFG_COMPLETE, "software dma_ack");
+                    trigger_norm_irq(ctx, IRQ_DMA_HD_WAIT_NORM, "software transfer done");
                     log_cycle(ctx, "dma_ack received, flow_ctl_en=0, go CFG_END_SW");
                     ctx->pending_cfg_complete = 1;
                     ctx->state = STATE_CFG_END_SW;
@@ -426,6 +504,8 @@ static void step_state_machine(SimContext *ctx) {
 
         case STATE_WAIT_START_ACK:
             if (ctx->cycle >= ctx->ack_cycle) {
+                trigger_norm_irq(ctx, IRQ_FLOW_CTRL_DONE, "software feof_trigger dma_ack");
+                trigger_norm_irq(ctx, IRQ_DMA_HD_WAIT_NORM, "software feof transfer done");
                 log_cycle(ctx, "dma_ack received, go CFG_END_SW");
                 ctx->pending_cfg_complete = 1;
                 ctx->state = STATE_CFG_END_SW;
@@ -437,6 +517,7 @@ static void step_state_machine(SimContext *ctx) {
                 complete_sw_cfg(ctx);
             }
             if (ctx->sw_cfg_cnt >= ctx->cfg.sw_cfg_num) {
+                trigger_norm_irq(ctx, IRQ_SW_LAST_DONE, "software burst finished");
                 complete_and_return_idle(ctx, "intr: sw_last_done, return IDLE");
                 return;
             }
@@ -539,6 +620,7 @@ static int run_simulation(const SimConfig *cfg) {
     }
 
     printf("result: %s\n", ctx.result);
+    print_irq_summary(&ctx);
     return ctx.completed ? 0 : 1;
 }
 
@@ -560,6 +642,7 @@ static void set_default_config(SimConfig *cfg) {
     cfg->sw_trigger = 0;
     cfg->sw_flow_ctl_en = 0;
     cfg->sw_cfg_num = 3;
+    cfg->channel_id = 0;
     cfg->sw_flow_ctl_dly_num = 2;
     cfg->pipe_busy_cycles = 1;
 }
@@ -624,6 +707,7 @@ static void print_usage(const char *program) {
     printf("  --sw-trigger 0|1\n");
     printf("  --flow-ctl 0|1\n");
     printf("  --sw-cfg-num N\n");
+    printf("  --channel-id N\n");
     printf("  --flow-delay N\n");
     printf("  --pipe-busy-cycles N\n");
 }
@@ -706,6 +790,10 @@ static int parse_args(int argc,
             }
         } else if (strcmp(argv[i], "--sw-cfg-num") == 0) {
             if (parse_int_arg("--sw-cfg-num", argv[++i], &cfg->sw_cfg_num) != 0) {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--channel-id") == 0) {
+            if (parse_int_arg("--channel-id", argv[++i], &cfg->channel_id) != 0) {
                 return -1;
             }
         } else if (strcmp(argv[i], "--sw-trigger") == 0) {
@@ -827,6 +915,7 @@ static int run_channel_mapping_verification(const SimConfig *template_cfg, int s
         /* Scheduler channel and DMA channel are one-to-one: ch -> ch */
         cfg.reg_mode_hw = 0;
         cfg.sw_trigger = 1;
+        cfg.channel_id = ch;
         printf("\n[channel-map] scheduler_ch=%d -> dma_ch=%d\n", ch, ch);
         rc = run_simulation(&cfg);
         if (rc != 0) {
