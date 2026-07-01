@@ -68,6 +68,8 @@ The simulator models 4 norm interrupt types per channel (conceptually 64-bit vec
    - Software branch: when the last configuration transfer of current `sw_trigger` burst finishes
 4. `dma_hd_wait_norm`
    - DMA transfer finished and returned to wait-handshake state
+   - modeled as state-transition side effect (emitted when control returns to handshake/wait state),
+     not as an unconditional second interrupt at every ack branch line
 
 The following firmware actions are logged in the simulation:
 

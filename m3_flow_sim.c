@@ -88,6 +88,8 @@ typedef struct {
     int sw_started;
     int completed;
     int isr_registered;
+    int pending_dma_hd_wait_irq;
+    const char *pending_dma_hd_wait_reason;
     uint64_t norm_irq_bitmap;
     int norm_irq_count[4];
     char result[MAX_TEXT];
@@ -191,7 +193,27 @@ static void print_irq_summary(const SimContext *ctx) {
            (unsigned long long)ctx->norm_irq_bitmap);
 }
 
+static void queue_dma_hd_wait_irq(SimContext *ctx, const char *reason) {
+    ctx->pending_dma_hd_wait_irq = 1;
+    ctx->pending_dma_hd_wait_reason = reason;
+}
+
+static void emit_pending_dma_hd_wait_irq(SimContext *ctx) {
+    if (!ctx->pending_dma_hd_wait_irq) {
+        return;
+    }
+    trigger_norm_irq(ctx,
+                     IRQ_DMA_HD_WAIT_NORM,
+                     ctx->pending_dma_hd_wait_reason != NULL ? ctx->pending_dma_hd_wait_reason
+                                                             : "dma returned to wait handshake");
+    ctx->pending_dma_hd_wait_irq = 0;
+    ctx->pending_dma_hd_wait_reason = NULL;
+}
+
 static void complete_and_return_idle(SimContext *ctx, const char *message) {
+    if (is_hw_mode(ctx)) {
+        emit_pending_dma_hd_wait_irq(ctx);
+    }
     ctx->completed = 1;
     ctx->state = STATE_IDLE;
     snprintf(ctx->result, sizeof(ctx->result), "%s", message);
@@ -464,7 +486,7 @@ static void step_state_machine(SimContext *ctx) {
         case STATE_WAIT_ACK_HW:
             if (ctx->cycle >= ctx->ack_cycle) {
                 trigger_norm_irq(ctx, IRQ_DMA_CFG_COMPLETE, "hardware dma_ack");
-                trigger_norm_irq(ctx, IRQ_DMA_HD_WAIT_NORM, "hardware transfer done");
+                queue_dma_hd_wait_irq(ctx, "hardware transfer done -> wait handshake");
                 complete_and_return_idle(ctx, "intr: dma_cfg_done, return IDLE");
             }
             return;
@@ -473,13 +495,13 @@ static void step_state_machine(SimContext *ctx) {
             if (ctx->cycle >= ctx->ack_cycle) {
                 if (sw_flow_enabled(ctx)) {
                     trigger_norm_irq(ctx, IRQ_DMA_CFG_COMPLETE, "software fsync_trigger dma_ack");
-                    trigger_norm_irq(ctx, IRQ_DMA_HD_WAIT_NORM, "software fsync transfer done");
+                    queue_dma_hd_wait_irq(ctx, "software fsync transfer done -> wait handshake");
                     log_cycle(ctx, "dma_ack received, flow_ctl_en=1, go WAIT_PIPE_FEOF");
                     arm_next_feof_wait(ctx);
                     ctx->state = STATE_WAIT_PIPE_FEOF;
                 } else {
                     trigger_norm_irq(ctx, IRQ_DMA_CFG_COMPLETE, "software dma_ack");
-                    trigger_norm_irq(ctx, IRQ_DMA_HD_WAIT_NORM, "software transfer done");
+                    queue_dma_hd_wait_irq(ctx, "software transfer done -> wait handshake");
                     log_cycle(ctx, "dma_ack received, flow_ctl_en=0, go CFG_END_SW");
                     ctx->pending_cfg_complete = 1;
                     ctx->state = STATE_CFG_END_SW;
@@ -505,7 +527,7 @@ static void step_state_machine(SimContext *ctx) {
         case STATE_WAIT_START_ACK:
             if (ctx->cycle >= ctx->ack_cycle) {
                 trigger_norm_irq(ctx, IRQ_FLOW_CTRL_DONE, "software feof_trigger dma_ack");
-                trigger_norm_irq(ctx, IRQ_DMA_HD_WAIT_NORM, "software feof transfer done");
+                queue_dma_hd_wait_irq(ctx, "software feof transfer done -> wait handshake");
                 log_cycle(ctx, "dma_ack received, go CFG_END_SW");
                 ctx->pending_cfg_complete = 1;
                 ctx->state = STATE_CFG_END_SW;
@@ -513,6 +535,7 @@ static void step_state_machine(SimContext *ctx) {
             return;
 
         case STATE_CFG_END_SW:
+            emit_pending_dma_hd_wait_irq(ctx);
             if (ctx->pending_cfg_complete) {
                 complete_sw_cfg(ctx);
             }
