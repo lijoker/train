@@ -42,7 +42,7 @@ typedef struct {
     int frame_cycles;
     int dma_ack_latency;
     int initial_dma_busy_cycles;
-    int max_cycles;
+    int watchdog_cycles;
 
     int reg_mode_hw;
     int hw_cfg_done;
@@ -182,8 +182,8 @@ static int validate_config(const SimConfig *cfg, char *error_text, size_t error_
         snprintf(error_text, error_text_size, "dma_ack_latency must be >= 1");
         return -1;
     }
-    if (cfg->max_cycles < 1) {
-        snprintf(error_text, error_text_size, "max_cycles must be >= 1");
+    if (cfg->watchdog_cycles < 0) {
+        snprintf(error_text, error_text_size, "watchdog_cycles must be >= 0");
         return -1;
     }
     if (cfg->hw_dly_num < 0) {
@@ -207,11 +207,11 @@ static int validate_config(const SimConfig *cfg, char *error_text, size_t error_
 
 static void print_banner(const SimConfig *cfg) {
     printf("\n=== M3 unified flow simulation ===\n");
-    printf("frame_cycles=%d, dma_ack_latency=%d, initial_dma_busy_cycles=%d, max_cycles=%d\n",
+    printf("frame_cycles=%d, dma_ack_latency=%d, initial_dma_busy_cycles=%d, watchdog_cycles=%d(0=auto)\n",
            cfg->frame_cycles,
            cfg->dma_ack_latency,
            cfg->initial_dma_busy_cycles,
-           cfg->max_cycles);
+           cfg->watchdog_cycles);
     printf("reg_mode=%s, sw_trigger=%d, sw_flow_ctl_en=%d\n",
            reg_mode_name(cfg->reg_mode_hw),
            cfg->sw_trigger,
@@ -448,9 +448,27 @@ static void step_state_machine(SimContext *ctx) {
     }
 }
 
+static int compute_wait_watchdog_cycles(const SimConfig *cfg) {
+    int base_wait = (cfg->frame_cycles * 2) + cfg->hw_dly_num + cfg->sw_flow_ctl_dly_num +
+                    cfg->pipe_busy_cycles + cfg->dma_ack_latency + cfg->initial_dma_busy_cycles + 16;
+    return base_wait < 8 ? 8 : base_wait;
+}
+
+static int compute_completion_budget_cycles(const SimConfig *cfg) {
+    int sw_burst_factor = cfg->sw_cfg_num < 1 ? 1 : cfg->sw_cfg_num;
+    int hw_factor = cfg->hw_skip_frame_num + 2;
+    int sw_factor = (cfg->sw_flow_ctl_en ? (cfg->frame_cycles * 2) : (cfg->dma_ack_latency + 4)) * sw_burst_factor;
+    int budget = cfg->initial_dma_busy_cycles + (cfg->frame_cycles * hw_factor) + sw_factor +
+                 cfg->hw_dly_num + cfg->dma_ack_latency * (sw_burst_factor + 2) + 64;
+    return budget;
+}
+
 static int run_simulation(const SimConfig *cfg) {
     SimContext ctx;
     char error_text[MAX_TEXT];
+    int watchdog_limit;
+    int completion_budget;
+    int stall_cycles = 0;
 
     if (validate_config(cfg, error_text, sizeof(error_text)) != 0) {
         fprintf(stderr, "Invalid config: %s\n", error_text);
@@ -459,17 +477,51 @@ static int run_simulation(const SimConfig *cfg) {
 
     print_banner(cfg);
     init_context(&ctx, cfg);
+    watchdog_limit = cfg->watchdog_cycles == 0 ? compute_wait_watchdog_cycles(cfg) : cfg->watchdog_cycles;
+    completion_budget = compute_completion_budget_cycles(cfg);
 
-    for (ctx.cycle = 0; ctx.cycle < cfg->max_cycles; ++ctx.cycle) {
-        if (ctx.completed || ctx.state == STATE_ERROR) {
+    ctx.cycle = 0;
+    while (!ctx.completed && ctx.state != STATE_ERROR) {
+        SimState prev_state = ctx.state;
+        int prev_sw_cfg_cnt = ctx.sw_cfg_cnt;
+        int prev_pending_cfg = ctx.pending_cfg_complete;
+        int prev_skipped_triggers = ctx.skipped_triggers;
+        int prev_hw_delay_pending = ctx.hw_delay_pending;
+        int prev_feof_seen = ctx.feof_seen;
+        int prev_ack_cycle = ctx.ack_cycle;
+        int prev_due_cycle = ctx.due_cycle;
+        bool progressed;
+
+        if (ctx.cycle > completion_budget) {
+            set_error(&ctx, "completion budget exceeded before returning to IDLE");
             break;
         }
 
         step_state_machine(&ctx);
+
+        progressed = ctx.completed || ctx.state == STATE_ERROR || ctx.state != prev_state ||
+                     ctx.sw_cfg_cnt != prev_sw_cfg_cnt || ctx.pending_cfg_complete != prev_pending_cfg ||
+                     ctx.skipped_triggers != prev_skipped_triggers || ctx.hw_delay_pending != prev_hw_delay_pending ||
+                     ctx.feof_seen != prev_feof_seen || ctx.ack_cycle != prev_ack_cycle ||
+                     ctx.due_cycle != prev_due_cycle;
+
+        if (progressed) {
+            stall_cycles = 0;
+        } else {
+            stall_cycles++;
+            if (stall_cycles > watchdog_limit) {
+                set_error(&ctx, "watchdog timeout: no state-machine progress");
+                break;
+            }
+        }
+
+        if (!ctx.completed && ctx.state != STATE_ERROR) {
+            ctx.cycle++;
+        }
     }
 
     if (!ctx.completed && ctx.state != STATE_ERROR) {
-        snprintf(ctx.result, sizeof(ctx.result), "timeout at cycle %d", cfg->max_cycles);
+        snprintf(ctx.result, sizeof(ctx.result), "simulation ended without completion");
         log_cycle(&ctx, ctx.result);
         return 1;
     }
@@ -495,7 +547,7 @@ static void set_default_config(SimConfig *cfg) {
     cfg->frame_cycles = 16;
     cfg->dma_ack_latency = 3;
     cfg->initial_dma_busy_cycles = 0;
-    cfg->max_cycles = 128;
+    cfg->watchdog_cycles = 0;
 
     cfg->reg_mode_hw = 0;
     cfg->hw_cfg_done = 1;
@@ -556,7 +608,7 @@ static void print_usage(const char *program) {
     printf("  --frame-cycles N\n");
     printf("  --dma-ack-latency N\n");
     printf("  --initial-dma-busy-cycles N\n");
-    printf("  --max-cycles N\n");
+    printf("  --watchdog-cycles N   (0 uses auto derived threshold)\n");
     printf("  --reg-mode hw|sw\n");
     printf("\nHardware options:\n");
     printf("  --hw-cfg-done 0|1\n");
@@ -604,8 +656,8 @@ static int parse_args(int argc, char **argv, SimConfig *cfg) {
             if (parse_int_arg("--initial-dma-busy-cycles", argv[++i], &cfg->initial_dma_busy_cycles) != 0) {
                 return -1;
             }
-        } else if (strcmp(argv[i], "--max-cycles") == 0) {
-            if (parse_int_arg("--max-cycles", argv[++i], &cfg->max_cycles) != 0) {
+        } else if (strcmp(argv[i], "--watchdog-cycles") == 0) {
+            if (parse_int_arg("--watchdog-cycles", argv[++i], &cfg->watchdog_cycles) != 0) {
                 return -1;
             }
         } else if (strcmp(argv[i], "--hw-cfg-done") == 0) {

@@ -20,6 +20,10 @@ The current implementation is aligned to the unified state-machine diagram, with
 
 Hardware trigger detection and `hw_dly_num` waiting are both handled inside `IDLE`, which matches the idea that the hardware branch only leaves `IDLE` after its trigger condition is satisfied.
 For completion, the simulator now requires a closed loop: it starts in `IDLE` and must return to `IDLE`.
+Instead of relying on a fixed `max_cycles` loop bound, completion is now checked with:
+
+- a progress watchdog (`watchdog_cycles`, or auto-derived when set to `0`)
+- a scenario-derived completion budget based on frame/ack/flow-control parameters
 
 ## Build
 
@@ -91,6 +95,7 @@ If you want the A500-like path that does not wait for `dma_ack`:
 - `--frame-cycles`: number of cycles in one frame
 - `--dma-ack-latency`: how many cycles later the DMA ack arrives
 - `--initial-dma-busy-cycles`: initial busy time of DMA, used to emulate a busy error path
+- `--watchdog-cycles`: no-progress watchdog threshold (`0` means auto-derived from scenario timing)
 - `--reg-mode hw|sw`: selects the hardware or software branch in the unified state machine
 - `--hw-cfg-done`: corresponds to `hw_cfg_done`
 - `--hw-delay`: corresponds to `hw_dly_num`
