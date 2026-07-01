@@ -9,6 +9,9 @@ The key control bits are:
 - `sw_trigger`: software trigger enable
 - `sw_flow_ctl_en`: software flow-control branch enable
 
+For software path, one simulation run now executes **one channel only** and must return to `IDLE`.
+If you have 32 channels, run 32 invocations (or script a loop) with different `--channel-index`.
+
 The current implementation is aligned to the unified state-machine diagram, with these main states:
 
 - `IDLE`
@@ -75,6 +78,7 @@ If you want the A500-like path that does not wait for `dma_ack`:
   --sw-trigger 1 \
   --flow-ctl 0 \
   --sw-cfg-num 4 \
+  --channel-index 0 \
   --dma-ack-latency 3
 ```
 
@@ -86,6 +90,7 @@ If you want the A500-like path that does not wait for `dma_ack`:
   --sw-trigger 1 \
   --flow-ctl 1 \
   --sw-cfg-num 3 \
+  --channel-index 1 \
   --flow-delay 2 \
   --pipe-busy-cycles 1
 ```
@@ -104,7 +109,8 @@ If you want the A500-like path that does not wait for `dma_ack`:
 - `--trigger fsync|teof`: hardware trigger source
 - `--sw-trigger`: corresponds to `sw_trigger`
 - `--flow-ctl`: corresponds to `sw_flow_ctl_en`
-- `--sw-cfg-num`: corresponds to `sw_cfg_num`
+- `--sw-cfg-num`: total configured channel count
+- `--channel-index`: selected channel index for this run (`0 <= channel-index < sw_cfg_num`)
 - `--flow-delay`: corresponds to `sw_flow_ctl_dly_num`
 - `--pipe-busy-cycles`: how long `pipe_busy` remains asserted before the FEOF wait logic can proceed
 
@@ -117,7 +123,7 @@ Because the flowcharts do not fully define every timing detail, the simulator us
 - `teof` happens in the middle of each frame
 - `feof` happens on the last cycle of each frame
 - each XDMA trigger completes after `dma_ack_latency` cycles
-- one `sw_trigger` starts a burst and completes `sw_cfg_num` configurations
+- one `sw_trigger` in this simulator run completes one selected channel
 - `hw_skip_frame_num` skips the first N trigger opportunities
 
 This makes the program suitable for software-level behavior simulation and state trace verification.
